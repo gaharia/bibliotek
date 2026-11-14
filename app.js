@@ -270,6 +270,7 @@ const selectedOrigins = new Set();  // ursprung (något av dem)
 let includePolitics = false;
 let sortMode = "author";
 let statusFilter = "all";
+let statusReader = null; // null = vem som helst, annars "David"/"Felicia"
 let langFilter = "all";
 const expanded = new Set();
 let currentSelection = [];
@@ -285,16 +286,23 @@ function originCounts() {
   const rank = (o) => { const i = ORIGINS.indexOf(o); return i < 0 ? 99 : i; };
   return [...m.entries()].sort((a, b) => rank(a[0]) - rank(b[0]) || collator.compare(a[0], b[0]));
 }
-const titleCmp = (a, b) => collator.compare(a.title, b.title);
-const authorCmp = (a, b) => collator.compare(authorSortKey(a), authorSortKey(b)) || collator.compare(a.title, b.title);
+// Titlar jämförs "naturligt": Del 2 före Del 10, och romerska siffror (Anna Karenina II) som tal.
+const natCollator = new Intl.Collator("sv", { sensitivity: "accent", numeric: true });
+const ROMAN = { i: 1, v: 5, x: 10, l: 50, c: 100 };
+function romanToInt(r) { let n = 0; for (let i = 0; i < r.length; i++) { const v = ROMAN[r[i]], w = ROMAN[r[i + 1]] || 0; n += v < w ? -v : v; } return n; }
+const natTitle = (t) => String(t || "").replace(/\b([ivxlc]+)\b/gi, (m) => /^(i|ii|iii|iv|v|vi|vii|viii|ix|x|xi|xii|xiii|xiv|xv|xx|xxx|l|c)$/i.test(m) ? String(romanToInt(m.toLowerCase())).padStart(3, "0") : m);
+const titleCmp = (a, b) => natCollator.compare(natTitle(a.title), natTitle(b.title));
+// Inom en författare: utgivningsår först (så bokserier som Wheel of Time hamnar i ordning), böcker utan år sist.
+const yearCmp = (a, b) => (a.year || 99999) - (b.year || 99999);
+const authorCmp = (a, b) => collator.compare(authorSortKey(a), authorSortKey(b)) || yearCmp(a, b) || titleCmp(a, b);
 
 function matches(b, q) {
   if (selectedMeta.size && !b.tags.some((t) => selectedMeta.has(t))) return false;
   if (selectedMeta.has("Sakprosa") && !includePolitics && politicsOnly(b)) return false;
   if (selectedOrigins.size && !b.origin.some((o) => selectedOrigins.has(o))) return false;
   for (const t of selectedTags) if (!b.tags.includes(t)) return false;
-  if (statusFilter === "read" && !b.read) return false;
-  if (statusFilter === "unread" && b.read) return false;
+  if (statusFilter === "read" && !(statusReader ? (b.readBy || []).includes(statusReader) : b.read)) return false;
+  if (statusFilter === "unread" && (statusReader ? (b.readBy || []).includes(statusReader) : b.read)) return false;
   if (langFilter === "unknown" && b.language) return false;
   if (langFilter !== "all" && langFilter !== "unknown" && b.language !== langFilter) return false;
   if (!q) return true;
@@ -400,6 +408,19 @@ function openFilters() {
   dialog({ title: "Filter", body, buttons: [{ label: "Klar" }] });
 }
 
+// Läst-knappen utgår från den som läser på enheten: grön = jag har läst, gul = bara den andra, grå = ingen.
+function readState(b) {
+  const me = currentReader(), by = b.readBy || [];
+  if (me && by.includes(me)) return "me";
+  if (b.read) return me ? "other" : "me";
+  return "none";
+}
+function readButton(b) {
+  const st = readState(b), me = currentReader();
+  const others = (b.readBy || []).filter((n) => n !== me);
+  const label = st === "me" ? "Markera som oläst för " + (me || "dig") : st === "other" ? `Läst av ${others.join(" och ") || "någon annan"} – markera som läst av ${me}` : "Markera som läst";
+  return `<button class="icon-btn read-btn ${st === "me" ? "on" : st === "other" ? "other" : ""}" aria-label="${esc(label)}" title="${esc(label)}">${st === "none" ? ICON_UNREAD : ICON_READ}</button>`;
+}
 function bookRow(b, grouped) {
   const row = document.createElement("div");
   row.className = "row" + (grouped ? " grouped" : "");
@@ -410,7 +431,7 @@ function bookRow(b, grouped) {
     (meta ? `<div class="m">${esc(meta)}</div>` : "") +
     (b.note ? `<div class="nt">${esc(b.note.length > 90 ? b.note.slice(0, 90) + " …" : b.note)}</div>` : "") +
     (b.tags.length ? `<div class="g">${esc(b.tags.join("  ·  "))}</div>` : "") + `</div>` +
-    `<button class="icon-btn read-btn${b.read ? " on" : ""}" aria-label="${b.read ? "Markera som oläst" : "Markera som läst"}">${b.read ? ICON_READ : ICON_UNREAD}</button>` +
+    readButton(b) +
     `<a class="icon-btn" href="${esc(goodreadsUrl(b))}" target="_blank" rel="noopener" aria-label="Öppna på Goodreads">${ICON_OPEN}</a>`;
   row.onclick = () => editBook(b);
   row.querySelector(".read-btn").onclick = (e) => { e.stopPropagation(); toggleRead(b); };
@@ -614,11 +635,12 @@ function suggestions(container, labelText, onPick) {
   l.className = "sugg-label";
   l.textContent = labelText;
   const g = document.createElement("div");
-  g.className = "sugg";
+  g.className = "sugg sugg-tags";
   for (const t of tags) {
     const c = document.createElement("button");
     c.className = "chip";
     c.textContent = t;
+    c.dataset.tag = t;
     c.onclick = () => onPick(t);
     g.appendChild(c);
   }
@@ -642,14 +664,23 @@ function askReader(then) {
 function withReader(fn) { const r = currentReader(); if (r) fn(r); else askReader(fn); }
 
 function toggleRead(b) {
-  const now = !b.read;
   const prev = { read: b.read, readBy: [...(b.readBy || [])] };
-  const apply = (reader) => {
-    const readBy = now ? [...new Set([...(b.readBy || []), ...(reader ? [reader] : [])])] : [];
-    updateBookDoc(b.id, { read: now, readBy });
-    snackbar(`”${b.title}” markerad som ${now ? "läst" + (reader ? " av " + reader : "") : "oläst"}`, "Ångra", () => updateBookDoc(b.id, prev));
-  };
-  if (now) withReader(apply); else apply(null);
+  withReader((me) => {
+    const by = b.readBy || [];
+    let readBy, read, msg;
+    if (by.includes(me) || (b.read && !by.length)) {
+      // Ta bort mig; boken är fortfarande läst om någon annan har läst den.
+      readBy = by.filter((n) => n !== me);
+      read = readBy.length > 0;
+      msg = `”${b.title}” markerad som oläst för ${me}`;
+    } else {
+      readBy = [...by, me];
+      read = true;
+      msg = `”${b.title}” markerad som läst av ${me}`;
+    }
+    updateBookDoc(b.id, { read, readBy });
+    snackbar(msg, "Ångra", () => updateBookDoc(b.id, prev));
+  });
 }
 
 // ---------- Lägg till / redigera ----------
@@ -687,7 +718,10 @@ function editBook(book, prefill = null, prefillIsbn = "", fromScan = false, from
     who.appendChild(c);
   });
   syncWho = () => who.querySelectorAll(".chip").forEach((c) => c.classList.toggle("on", readBy.includes(c.textContent)));
-  const fG = field("Taggar (separera med kommatecken)", book ? book.tags.join(", ") : "");
+  const fG = document.createElement("div");
+  fG.className = "field";
+  fG.innerHTML = `<label>Taggar (separera med kommatecken)</label><textarea class="tags-input" rows="1"></textarea>`;
+  fG.querySelector("textarea").value = book ? book.tags.join(", ") : "";
   // Ursprung (författarens), ett eller flera
   let origin = book ? [...book.origin] : [...(prefill?.origin || [])];
   const fO = document.createElement("div");
@@ -721,7 +755,10 @@ function editBook(book, prefill = null, prefillIsbn = "", fromScan = false, from
   const inNote = fNote.querySelector("textarea");
   inNote.value = book ? (book.note || "") : "";
   body.append(fA, fT, fI, langRow, fO, sw, who, fG, fNote);
-  const inA = fA.querySelector("input"), inT = fT.querySelector("input"), inI = fI.querySelector("input"), inG = fG.querySelector("input");
+  const inA = fA.querySelector("input"), inT = fT.querySelector("input"), inI = fI.querySelector("input"), inG = fG.querySelector("textarea");
+  // Taggrutan växer med texten; Enter ger inte ny rad.
+  const growTags = () => { inG.style.height = "auto"; inG.style.height = inG.scrollHeight + 2 + "px"; };
+  inG.addEventListener("keydown", (e) => { if (e.key === "Enter") e.preventDefault(); });
   const fetchBtn = langRow.querySelector(".fetch-pages");
   fetchBtn.onclick = async () => {
     fetchBtn.textContent = "Söker …"; fetchBtn.disabled = true;
@@ -747,10 +784,20 @@ function editBook(book, prefill = null, prefillIsbn = "", fromScan = false, from
     if (o.length) { origin = o; drawOrigins(); }
   };
   inA.addEventListener("change", () => { if (!origin.length) { const k = sameAuthorOrigin(inA.value.trim()); if (k) { origin = [...k]; drawOrigins(); } } });
-  suggestions(body, "Befintliga taggar – tryck för att lägga till", (t) => {
+  // Föreslagna taggar: de som redan är med är markerade, tryck igen för att ta bort.
+  const markTags = () => {
+    const cur = parseTags(inG.value).map((x) => x.toLowerCase());
+    body.querySelectorAll(".sugg-tags .chip").forEach((c) => c.classList.toggle("on", cur.includes(c.dataset.tag.toLowerCase())));
+  };
+  suggestions(body, "Befintliga taggar – tryck för att lägga till eller ta bort", (t) => {
     const cur = parseTags(inG.value);
-    if (!cur.includes(t)) inG.value = [...cur, t].join(", ");
+    const has = cur.some((x) => x.toLowerCase() === t.toLowerCase());
+    inG.value = (has ? cur.filter((x) => x.toLowerCase() !== t.toLowerCase()) : [...cur, t]).join(", ");
+    markTags(); growTags();
   });
+  inG.addEventListener("input", () => { markTags(); growTags(); });
+  markTags();
+  requestAnimationFrame(growTags);
   const gr = document.createElement("a");
   gr.className = "btn-text";
   gr.target = "_blank";
@@ -1571,11 +1618,25 @@ $("search").addEventListener("input", (e) => {
 $("clearSearch").onclick = () => { $("search").value = ""; query = ""; $("searchWrap").classList.remove("has-text"); renderList(); };
 $("langFilter").onchange = (e) => { langFilter = e.target.value; renderList(); };
 $("filterBtn").onclick = openFilters;
+// Olästa/Lästa: välj vems läsning som gäller (vem som helst, David eller Felicia).
+function setStatus(s, reader) {
+  statusFilter = s; statusReader = s === "all" ? null : reader;
+  $("statusGroup").querySelectorAll("button").forEach((x) => {
+    x.classList.toggle("on", x.dataset.s === s);
+    const base = x.dataset.s === "read" ? "Lästa" : x.dataset.s === "unread" ? "Olästa" : "Alla";
+    x.textContent = base + (x.dataset.s === s && statusReader ? " · " + statusReader : "");
+  });
+  renderList();
+}
 $("statusGroup").querySelectorAll("button").forEach((b) => {
   b.onclick = () => {
-    $("statusGroup").querySelectorAll("button").forEach((x) => x.classList.toggle("on", x === b));
-    statusFilter = b.dataset.s;
-    renderList();
+    const s = b.dataset.s;
+    if (s === "all") { setStatus("all", null); return; }
+    const verb = s === "read" ? "Lästa av" : "Olästa av";
+    choiceDialog(s === "read" ? "Visa lästa" : "Visa olästa",
+      [["", s === "read" ? "Lästa av någon" : "Olästa av alla"], ...READERS.map((n) => [n, `${verb} ${n}`])],
+      statusFilter === s ? (statusReader || "") : null,
+      (k) => setStatus(s, k || null));
   };
 });
 window.addEventListener("online", () => { if (syncState === "offline") { syncState = "synkar …"; renderList(); } });
