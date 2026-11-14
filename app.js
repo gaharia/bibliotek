@@ -72,9 +72,11 @@ function naturalName(name) {
   const m = a.match(/^([^,]+),\s*([^,]+)$/);
   return m ? `${m[2].trim()} ${m[1].trim()}` : a;
 }
+// "Antologi", "Diverse", "Okänd" m.fl. är inga författarnamn och hamnar sist i listan.
 function authorSortKey(b) {
   const a = (b.author || "").trim();
-  if (!a) return "\uffff";
+  if (!a) return "\uffff\uffff";
+  if (ANTHOLOGY.includes(normName(a))) return "\uffff" + a;
   return displayAuthor(a);
 }
 const groupKey = (b) => normName(naturalName(b.author)) || (b.author || "").trim().toLowerCase();
@@ -233,14 +235,15 @@ function fromDoc(id, d) {
     language: String(d.language || ""),
     note: String(d.note || ""),
     readBy: Array.isArray(d.readBy) ? d.readBy.map(String) : [],
-    origin: Array.isArray(d.origin) ? d.origin.map(String) : []
+    origin: Array.isArray(d.origin) ? d.origin.map(String) : [],
+    year: Number(d.year) || 0
   };
 }
 function toData(b) {
   return {
     author: b.author, title: b.title, tags: b.tags, read: !!b.read,
     isbn: b.isbn || "", added: b.added || Date.now(), updatedBy: user ? user.email : "",
-    pages: Number(b.pages) || 0, language: b.language || "", note: b.note || "", readBy: b.readBy || [], origin: b.origin || []
+    pages: Number(b.pages) || 0, language: b.language || "", note: b.note || "", readBy: b.readBy || [], origin: b.origin || [], year: Number(b.year) || 0
   };
 }
 // Skrivningar sparas lokalt direkt och synkas när det finns nät.
@@ -401,7 +404,7 @@ function bookRow(b, grouped) {
   const row = document.createElement("div");
   row.className = "row" + (grouped ? " grouped" : "");
   const showAuthor = !grouped && b.author;
-  const meta = [b.language, b.origin.join(", "), b.pages ? b.pages + " s." : "", (b.readBy || []).length ? "Läst av " + b.readBy.join(" och ") : ""].filter(Boolean).join(" · ");
+  const meta = [b.language, b.origin.join(", "), b.year ? String(b.year) : "", b.pages ? b.pages + " s." : "", (b.readBy || []).length ? "Läst av " + b.readBy.join(" och ") : ""].filter(Boolean).join(" · ");
   row.innerHTML = `<div class="txt"><div class="t">${esc(b.title || "Utan titel")}</div>` +
     (showAuthor ? `<div class="a">${esc(displayAuthor(b.author))}</div>` : "") +
     (meta ? `<div class="m">${esc(meta)}</div>` : "") +
@@ -489,7 +492,8 @@ function renderMenu() {
     ["Importera Excel", () => { importTarget = "library"; $("importInput").click(); }],
     ["Exportera Excel", chooseExport],
     ["Sortera", chooseSort],
-    [`Hämta sidantal (${books.filter((b) => !b.pages).length} saknas)`, fetchAllPages],
+    [`Hämta sidantal och år (${books.filter(needsFill).length} saknas)`, fetchAllPages],
+    [`Läsare på den här enheten: ${currentReader() || "inte vald"}`, () => askReader(() => renderMenu())],
   ];
   const oldOrigin = books.filter((b) => b.tags.some((t) => ORIGINS.includes(t))).length;
   if (!wish && oldOrigin) items.push([`Flytta ursprungstaggar till Ursprung (${oldOrigin})`, migrateOriginTags]);
@@ -622,10 +626,30 @@ function suggestions(container, labelText, onPick) {
 }
 
 // ---------- Läst / oläst ----------
+// Vem som läser: valet som sparats på enheten, annars förnamnet i det inloggade Google-kontot.
+const READER_KEY = "bibliotek-reader";
+function currentReader() {
+  try { const s = localStorage.getItem(READER_KEY); if (READERS.includes(s)) return s; } catch (e) {}
+  const dn = ((user && user.displayName) || "").trim().toLowerCase();
+  return READERS.find((n) => dn.startsWith(n.toLowerCase())) || null;
+}
+function askReader(then) {
+  choiceDialog("Vem läser på den här enheten?", READERS.map((n) => [n, n]), currentReader(), (n) => {
+    try { localStorage.setItem(READER_KEY, n); } catch (e) {}
+    if (then) then(n);
+  });
+}
+function withReader(fn) { const r = currentReader(); if (r) fn(r); else askReader(fn); }
+
 function toggleRead(b) {
   const now = !b.read;
-  updateBookDoc(b.id, { read: now });
-  snackbar(`”${b.title}” markerad som ${now ? "läst" : "oläst"}`, "Ångra", () => updateBookDoc(b.id, { read: !now }));
+  const prev = { read: b.read, readBy: [...(b.readBy || [])] };
+  const apply = (reader) => {
+    const readBy = now ? [...new Set([...(b.readBy || []), ...(reader ? [reader] : [])])] : [];
+    updateBookDoc(b.id, { read: now, readBy });
+    snackbar(`”${b.title}” markerad som ${now ? "läst" + (reader ? " av " + reader : "") : "oläst"}`, "Ångra", () => updateBookDoc(b.id, prev));
+  };
+  if (now) withReader(apply); else apply(null);
 }
 
 // ---------- Lägg till / redigera ----------
@@ -638,7 +662,14 @@ function editBook(book, prefill = null, prefillIsbn = "", fromScan = false, from
   sw.className = "switch-row";
   let read = book ? !!book.read : false; // Oläst är standard
   sw.innerHTML = `<span>Läst</span><div class="switch${read ? " on" : ""}" role="switch" aria-checked="${read}"></div>`;
-  sw.onclick = () => { read = !read; sw.lastChild.classList.toggle("on", read); sw.lastChild.setAttribute("aria-checked", read); };
+  let syncWho = () => {};
+  sw.onclick = (e) => {
+    read = !read; sw.lastChild.classList.toggle("on", read); sw.lastChild.setAttribute("aria-checked", read);
+    if (!e || e.isTrusted === false) return;
+    if (read && !readBy.length) { const r = currentReader(); if (r) readBy = [r]; }
+    if (!read) readBy = [];
+    syncWho();
+  };
   // Läst av (valfritt): att välja en person markerar boken som läst.
   let readBy = book ? [...(book.readBy || [])] : [];
   const who = document.createElement("div");
@@ -651,10 +682,11 @@ function editBook(book, prefill = null, prefillIsbn = "", fromScan = false, from
     c.onclick = () => {
       readBy = readBy.includes(name) ? readBy.filter((n) => n !== name) : [...readBy, name];
       c.classList.toggle("on", readBy.includes(name));
-      if (readBy.length && !read) sw.onclick();
+      if (readBy.length && !read) { read = true; sw.lastChild.classList.add("on"); sw.lastChild.setAttribute("aria-checked", true); }
     };
     who.appendChild(c);
   });
+  syncWho = () => who.querySelectorAll(".chip").forEach((c) => c.classList.toggle("on", readBy.includes(c.textContent)));
   const fG = field("Taggar (separera med kommatecken)", book ? book.tags.join(", ") : "");
   // Ursprung (författarens), ett eller flera
   let origin = book ? [...book.origin] : [...(prefill?.origin || [])];
@@ -679,9 +711,10 @@ function editBook(book, prefill = null, prefillIsbn = "", fromScan = false, from
   langRow.className = "field-row";
   const lang0 = book ? book.language : (prefill?.language || "");
   langRow.innerHTML = `<div class="field"><label>Språk</label><select>${["", ...LANGS].map((l) => `<option value="${l}"${l === lang0 ? " selected" : ""}>${l || "Okänt"}</option>`).join("")}</select></div>` +
-    `<div class="field"><label>Sidor</label><input inputmode="numeric" value="${(book ? book.pages : prefill?.pages) || ""}"></div>` +
-    `<button class="btn-text small fetch-pages">Hämta sidantal</button>`;
-  const selLang = langRow.querySelector("select"), inP = langRow.querySelector("input");
+    `<div class="field"><label>Sidor</label><input class="in-pages" inputmode="numeric" value="${(book ? book.pages : prefill?.pages) || ""}"></div>` +
+    `<div class="field"><label>Utgiven</label><input class="in-year" inputmode="numeric" placeholder="år" value="${(book ? book.year : prefill?.year) || ""}"></div>` +
+    `<button class="btn-text small fetch-pages">Hämta sidor och år</button>`;
+  const selLang = langRow.querySelector("select"), inP = langRow.querySelector(".in-pages"), inY = langRow.querySelector(".in-year");
   const fNote = document.createElement("div");
   fNote.className = "field";
   fNote.innerHTML = `<label>Anteckning</label><textarea rows="3"></textarea>`;
@@ -692,10 +725,12 @@ function editBook(book, prefill = null, prefillIsbn = "", fromScan = false, from
   const fetchBtn = langRow.querySelector(".fetch-pages");
   fetchBtn.onclick = async () => {
     fetchBtn.textContent = "Söker …"; fetchBtn.disabled = true;
-    const n = await fetchPages({ isbn: normalizeIsbn(inI.value), title: inT.value.trim(), author: inA.value.trim() });
+    const q = { isbn: normalizeIsbn(inI.value), title: inT.value.trim(), author: inA.value.trim() };
+    const [n, y] = await Promise.all([inP.value ? null : fetchPages(q).catch(() => null), inY.value ? null : fetchYear(q).catch(() => null)]);
     fetchBtn.disabled = false;
-    if (n) { inP.value = n; fetchBtn.textContent = "Hämta sidantal"; }
-    else fetchBtn.textContent = "Hittade inget";
+    if (n) inP.value = n;
+    if (y) inY.value = y;
+    fetchBtn.textContent = n || y || (inP.value && inY.value) ? "Hämta sidor och år" : "Hittade inget";
   };
   // Ursprung: samma som författarens andra böcker, annars Wikidata.
   const sameAuthorOrigin = (a) => { const o = books.find((x) => x.origin.length && sameAuthor(x.author, a)); return o ? o.origin : null; };
@@ -738,12 +773,13 @@ function editBook(book, prefill = null, prefillIsbn = "", fromScan = false, from
         if (!author && !title) { toast("Fyll i författare eller titel"); return; }
         const tags = parseTags(inG.value), isbn = normalizeIsbn(inI.value);
         const pages = parseInt(inP.value, 10) || 0, language = selLang.value, note = inNote.value.trim();
+        const year = parseInt(inY.value, 10) || 0;
         if (!read) readBy = [];
         if (!book) {
-          addBookDoc({ author, title, tags, read, isbn, added: Date.now(), pages, language, note, readBy, origin });
+          addBookDoc({ author, title, tags, read, isbn, added: Date.now(), pages, language, note, readBy, origin, year });
           if (fromWishId) { deleteWish(fromWishId); toast(`”${title}” flyttad från önskelistan till biblioteket`); }
           else setTimeout(() => checkWishAfterAdd(author, title), 300);
-        } else updateBookDoc(book.id, { author, title, tags, read, isbn, pages, language, note, readBy, origin });
+        } else updateBookDoc(book.id, { author, title, tags, read, isbn, pages, language, note, readBy, origin, year });
         expanded.add(groupKey({ author }));
         if (fromScan) snackbar(`”${title}” sparad`, "Skanna nästa", startScan, 6000);
       } }
@@ -905,14 +941,34 @@ async function lookup(isbn) {
   let found = null;
   for (const s of sources) { try { const r = await s(); if (r && r.title) { found = r; break; } } catch (e) {} }
   if (found) {
-    const [pages, origin] = await Promise.all([
+    const [pages, origin, year] = await Promise.all([
       found.pages ? found.pages : fetchPages({ isbn, title: found.title, author: found.author }).catch(() => 0),
-      lookupOrigin(found.author)
+      lookupOrigin(found.author),
+      Promise.race([fetchYear(found).catch(() => null), new Promise((r) => setTimeout(() => r(null), 10000))])
     ]);
     found.pages = pages || 0;
     found.origin = origin;
+    found.year = year || 0;
   }
   return found;
+}
+
+// Utgivningsår (första utgåvan av verket): Wikidata via författarens verk (titlar på flera språk),
+// annars Open Library (first_publish_year).
+async function fetchYear({ title, author }) {
+  if (!title) return null;
+  const a = author && !ANTHOLOGY.includes(normName(author)) ? authorNames(naturalName(author))[0] : "";
+  if (a) {
+    try {
+      const w = await getWorks(a);
+      const hit = w.works.find((x) => x.year && (x.titles && x.titles.length ? x.titles : [x.title]).some((t) => sameTitle(title, t)));
+      if (hit) return Number(hit.year);
+    } catch (e) {}
+  }
+  const q = `title=${encodeURIComponent(title)}` + (a ? `&author=${encodeURIComponent(a)}` : "");
+  const s = await getJson(`https://openlibrary.org/search.json?${q}&fields=title,first_publish_year&limit=5`);
+  const ys = (s?.docs || []).map((x) => x.first_publish_year).filter(Boolean);
+  return ys.length ? Math.min(...ys) : null;
 }
 
 // Sidantal: Open Library (ISBN), Google Books (ISBN), sedan Open Library via titel + författare (medianvärde av utgåvorna).
@@ -932,53 +988,45 @@ async function fetchPages({ isbn, title, author }) {
   return null;
 }
 
-async function fetchAllPages() {
-  const missing = books.filter((b) => !b.pages);
-  if (!missing.length) { toast("Alla böcker har redan sidantal"); return; }
-  let cancelled = false, done = 0;
-  const found = [];
-  const box = document.createElement("div");
-  box.className = "progress";
-  box.innerHTML = `<div class="spinner"></div><div class="pt">Hämtar sidantal … 0 av ${missing.length}</div>`;
-  const d = dialog({ title: "Hämtar sidantal", body: box, cancelable: false, buttons: [{ label: "Avbryt", action: () => { cancelled = true; } }] });
-  for (const b of missing) {
-    if (cancelled) break;
-    try { const n = await fetchPages(b); if (n) found.push([b.id, n]); } catch (e) {}
-    done++;
-    box.querySelector(".pt").textContent = `Hämtar sidantal … ${done} av ${missing.length} (hittade ${found.length})`;
-    await new Promise((res) => setTimeout(res, 250));
-  }
-  d.close();
-  if (found.length) runBatches(found.map(([id, n]) => (batch) => batch.update(doc(booksCol, id), { pages: n, updatedBy: user ? user.email : "" })));
-  toast(`Hittade sidantal för ${found.length} av ${done} böcker. Övriga kan fyllas i för hand.`);
-}
-
-// Hämtar sidantal i bakgrunden efter en import. Varje träff sparas direkt,
+// Hämtar saknade sidantal och utgivningsår i bakgrunden. Varje träff sparas direkt,
 // så det som hunnit hämtas finns kvar även om appen stängs.
+const needsFill = (b) => !b.pages || !b.year;
+function fetchAllPages() {
+  const missing = books.filter(needsFill);
+  if (!missing.length) { toast("Alla böcker har redan sidantal och år"); return; }
+  backgroundPages(missing);
+}
 let bgPagesRunning = false;
 async function backgroundPages(list) {
-  if (bgPagesRunning || !list.length) return;
+  if (bgPagesRunning) { toast("Hämtning pågår redan"); return; }
+  if (!list.length) return;
   bgPagesRunning = true;
   let cancelled = false, done = 0, found = 0;
   const pill = document.createElement("div");
   pill.className = "bgjob";
   pill.innerHTML = `<div class="spinner"></div><span></span><button aria-label="Avbryt">✕</button>`;
   const label = pill.querySelector("span");
-  const upd = () => { label.textContent = `Hämtar sidantal ${done}/${list.length} (hittade ${found})`; };
+  const upd = () => { label.textContent = `Hämtar sidor och år ${done}/${list.length} (hittade ${found})`; };
   pill.querySelector("button").onclick = () => { cancelled = true; };
   upd();
   $("phone").appendChild(pill);
   for (const b of list) {
     if (cancelled) break;
-    const cur = books.find((x) => x.id === b.id);
-    if (cur && cur.pages) { done++; upd(); continue; }
-    try { const n = await fetchPages(cur || b); if (n) { updateBookDoc(b.id, { pages: n }); found++; } } catch (e) {}
+    const cur = books.find((x) => x.id === b.id) || b;
+    if (cur.pages && cur.year) { done++; upd(); continue; }
+    try {
+      const [n, y] = await Promise.all([cur.pages ? null : fetchPages(cur).catch(() => null), cur.year ? null : fetchYear(cur).catch(() => null)]);
+      const f = {};
+      if (n) f.pages = n;
+      if (y) f.year = y;
+      if (Object.keys(f).length) { updateBookDoc(b.id, f); found++; }
+    } catch (e) {}
     done++; upd();
     await new Promise((res) => setTimeout(res, 250));
   }
   pill.remove();
   bgPagesRunning = false;
-  toast(cancelled ? `Avbröt. Hittade sidantal för ${found} böcker.` : `Sidantal hittades för ${found} av ${list.length} böcker.`);
+  toast(cancelled ? `Avbröt. Hittade uppgifter för ${found} böcker.` : `Sidantal eller år hittades för ${found} av ${list.length} böcker.`);
 }
 
 // Engångsstädning: taggar som är ursprung (t.ex. "Afrikanskt") flyttas till fältet Ursprung.
@@ -1007,6 +1055,7 @@ const H = {
   language: ["språk", "sprak", "language", "lang"],
   pages: ["sidor", "sidantal", "antal sidor", "pages"],
   origin: ["ursprung", "origin", "härkomst", "harkomst", "nationalitet"],
+  year: ["år", "ar", "utgiven", "utgivningsår", "utgivningsar", "publiceringsår", "publikationsår", "publikationsar", "year", "published"],
   readBy: ["läst av", "last av", "read by"]
 };
 let importTarget = "library";
@@ -1040,8 +1089,8 @@ function toRows(grid) {
   const find = (names) => { const i = header.findIndex((v) => names.includes(norm(v))); return i < 0 ? null : i; };
   let aCol = find(H.author), tCol = find(H.title);
   const gCol = find(H.tags), sCol = find(H.status), iCol = find(H.isbn), nCol = find(H.note);
-  const lCol = find(H.language), pCol = find(H.pages), rbCol = find(H.readBy), oCol = find(H.origin);
-  const hasHeader = [aCol, tCol, gCol, sCol, iCol, nCol, lCol, pCol, rbCol, oCol].some((x) => x !== null);
+  const lCol = find(H.language), pCol = find(H.pages), rbCol = find(H.readBy), oCol = find(H.origin), yCol = find(H.year);
+  const hasHeader = [aCol, tCol, gCol, sCol, iCol, nCol, lCol, pCol, rbCol, oCol, yCol].some((x) => x !== null);
   if (aCol === null && tCol === null) { aCol = 0; tCol = 1; }
   else if (aCol === null) aCol = tCol === 0 ? 1 : 0;
   else if (tCol === null) tCol = aCol === 1 ? 0 : 1;
@@ -1059,7 +1108,8 @@ function toRows(grid) {
     const pages = pCol === null ? 0 : (parseInt(String(r[pCol]).replace(/\D/g, ""), 10) || 0);
     const readBy = rbCol === null ? [] : READERS.filter((n) => String(r[rbCol] || "").toLowerCase().includes(n.toLowerCase()));
     const origin = oCol === null ? [] : parseTags(r[oCol] || "");
-    out.push({ author, title, tags, read: readBy.length ? true : read, isbn, note, language, pages, readBy, origin });
+    const year = yCol === null ? 0 : (parseInt(String(r[yCol]).replace(/[^\d-]/g, ""), 10) || 0);
+    out.push({ author, title, tags, read: readBy.length ? true : read, isbn, note, language, pages, readBy, origin, year });
   }
   return out;
 }
@@ -1112,10 +1162,10 @@ function importRows(rows, common, replace = false) {
       if (seenNew.has(k)) { unchanged++; continue; }
       seenNew.add(k);
       const data = toData({ author: r.author, title: r.title, tags, read: r.read ?? false, isbn: r.isbn, added: now + added,
-        language: r.language, pages: r.pages, note: r.note, readBy: r.readBy, origin: r.origin });
+        language: r.language, pages: r.pages, note: r.note, readBy: r.readBy, origin: r.origin, year: r.year });
       const ref = doc(booksCol);
       ops.push((batch) => batch.set(ref, data));
-      if (!data.pages) needPages.push({ id: ref.id, isbn: data.isbn, author: data.author, title: data.title });
+      if (!data.pages || !data.year) needPages.push({ id: ref.id, isbn: data.isbn, author: data.author, title: data.title });
       added++;
     } else {
       const fields = {};
@@ -1133,7 +1183,8 @@ function importRows(rows, common, replace = false) {
       if (!ex.isbn && r.isbn) fields.isbn = r.isbn;
       if (!ex.language && r.language) fields.language = r.language;
       if (!ex.pages && r.pages) fields.pages = r.pages;
-      if (!ex.pages && !r.pages) needPages.push({ id: ex.id, isbn: ex.isbn || r.isbn, author: ex.author, title: ex.title });
+      if (!ex.year && r.year) fields.year = r.year;
+      if ((!ex.pages && !r.pages) || (!ex.year && !r.year)) needPages.push({ id: ex.id, isbn: ex.isbn || r.isbn, author: ex.author, title: ex.title, pages: ex.pages || r.pages, year: ex.year || r.year });
       if (!ex.note && r.note) fields.note = r.note;
       const rb = [...new Set([...(ex.readBy || []), ...(r.readBy || [])])];
       if (rb.length !== (ex.readBy || []).length) { fields.readBy = rb; if (!ex.read) fields.read = true; }
@@ -1160,11 +1211,11 @@ function chooseExport() {
 
 function exportBooks(list) {
   if (typeof XLSX === "undefined") { toast("Exporten misslyckades"); return; }
-  const aoa = [["Författare", "Titel", "Taggar", "Ursprung", "Språk", "Status", "Läst av", "Sidor", "ISBN", "Anteckning"]].concat(
-    list.map((b) => [b.author, b.title, b.tags.join(", "), b.origin.join(", "), b.language || "", b.read ? "Läst" : "Oläst",
+  const aoa = [["Författare", "Titel", "Taggar", "Ursprung", "Språk", "År", "Status", "Läst av", "Sidor", "ISBN", "Anteckning"]].concat(
+    list.map((b) => [b.author, b.title, b.tags.join(", "), b.origin.join(", "), b.language || "", b.year || "", b.read ? "Läst" : "Oläst",
       (b.readBy || []).join(", "), b.pages || "", b.isbn || "", b.note || ""]));
   const ws = XLSX.utils.aoa_to_sheet(aoa);
-  ws["!cols"] = [{ wch: 30 }, { wch: 45 }, { wch: 25 }, { wch: 22 }, { wch: 10 }, { wch: 8 }, { wch: 16 }, { wch: 7 }, { wch: 16 }, { wch: 40 }];
+  ws["!cols"] = [{ wch: 30 }, { wch: 45 }, { wch: 25 }, { wch: 22 }, { wch: 10 }, { wch: 6 }, { wch: 8 }, { wch: 16 }, { wch: 7 }, { wch: 16 }, { wch: 40 }];
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, "Böcker");
   const data = XLSX.write(wb, { type: "array", bookType: "xlsx" });
@@ -1191,7 +1242,8 @@ function sameAuthor(a, b) {
 }
 // Böcker med "Antologi" (eller liknande) som författare räknas inte som att man
 // "har" en viss författare – deras bidragsgivare ska fortfarande kunna föreslås.
-const ANTHOLOGY = ["antologi", "antologier", "anthology", "diverse", "diverse forfattare", "olika forfattare", "various", "various authors"];
+const ANTHOLOGY = ["antologi", "antologier", "anthology", "diverse", "diverse forfattare", "olika forfattare", "various", "various authors",
+  "okand", "okand forfattare", "anonym", "anonymous", "unknown"];
 const isAnthology = (b) => ANTHOLOGY.includes(normName(b.author)) || b.tags.some((t) => ["antologi", "anthology"].includes(normName(t)));
 // "Charlotte, Emily & Anne Brontë" → ["Charlotte Brontë", "Emily Brontë", "Anne Brontë"]
 function authorNames(a) {

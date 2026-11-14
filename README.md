@@ -69,6 +69,7 @@ Logga in, välj ⋮ → **Importera Excel** och välj `Bokhylla.xlsx`. Ange tagg
 | Taggar | Skönlitteratur, Noveller | kommaseparerade |
 | Ursprung | Svenskt, Nordiskt | författarens, kommaseparerat |
 | Språk | Svenska | Svenska, Engelska, Ryska eller Övrigt |
+| År | 1877 | första utgivningsår, valfritt (hämtas annars automatiskt) |
 | Status, Läst av, Sidor, ISBN, Anteckning | | valfria |
 
 ---

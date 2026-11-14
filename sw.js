@@ -1,5 +1,5 @@
 // Gör att appen startar även utan internet. Böckerna själva cachas av Firestore.
-const CACHE = "bibliotek-v7";
+const CACHE = "bibliotek-v8";
 const SHELL = ["./", "./index.html", "./app.js", "./tips.js", "./firebase-config.js", "./manifest.webmanifest",
   "./icon-192.png", "./icon-512.png", "./apple-touch-icon.png"];
 const CDN_HOSTS = ["cdnjs.cloudflare.com", "www.gstatic.com", "fonts.googleapis.com", "fonts.gstatic.com"];
