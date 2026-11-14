@@ -43,10 +43,23 @@
   .appbar .icon-btn:hover { background: rgba(255,255,255,.12); }
   .icon-btn svg { width: 24px; height: 24px; fill: currentColor; }
   .search { margin: 12px 16px 0; position: relative; }
-  .search input { width: 100%; height: 48px; border: 1px solid var(--outline); border-radius: 4px; padding: 0 40px 0 44px; font: inherit; font-size: 16px; background: transparent; outline: none; }
+  .search input { width: 100%; height: 48px; border: 1px solid var(--outline); border-radius: 4px; padding: 0 88px 0 44px; font: inherit; font-size: 16px; background: transparent; outline: none; }
   .search input:focus { border: 2px solid var(--primary); padding-left: 43px; }
   .search .s-icon { position: absolute; left: 12px; top: 12px; width: 24px; height: 24px; fill: var(--on-variant); }
-  .search .clear { position: absolute; right: 0; top: 0; color: var(--on-variant); display: none; }
+  .search .clear { position: absolute; right: 44px; top: 0; color: var(--on-variant); display: none; }
+  .search .filter-btn { position: absolute; right: 0; top: 0; color: var(--on-variant); }
+  .search .filter-btn.on { color: var(--primary); }
+  .search .filter-btn .badge { position: absolute; top: 6px; right: 4px; min-width: 16px; height: 16px; border-radius: 8px; background: var(--primary); color: var(--on-primary, #fff); font-size: 11px; line-height: 16px; text-align: center; padding: 0 4px; }
+  .active-filters { padding-top: 0; }
+  .chip.removable::before { content: none; }
+  .chip.toggle { border-style: dashed; font-size: 13px; }
+  .filters .f-head { display: flex; align-items: baseline; gap: 8px; margin: 12px 0 6px; font-weight: 600; }
+  .filters .f-head small { font-weight: 400; color: var(--on-variant); font-size: 12px; }
+  .filters .sugg { display: flex; flex-wrap: wrap; gap: 6px; }
+  .muted.small { font-size: 12px; margin: 4px 0 8px; }
+  .origin-field { border: 1px solid var(--outline); border-radius: 4px; padding: 14px 10px 4px; margin-top: 16px; }
+  .origin-field .sugg { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 4px; }
+  .origin-field .chip { height: 28px; font-size: 13px; padding: 0 10px; }
   .search.has-text .clear { display: grid; }
   .segmented { display: inline-flex; margin: 8px 16px 0; border: 1px solid var(--outline); border-radius: 20px; overflow: hidden; flex-shrink: 0; align-self: flex-start; }
   .segmented button { border: 0; border-right: 1px solid var(--outline); background: none; font: inherit; font-size: 14px; font-weight: 500; height: 36px; padding: 0 16px; cursor: pointer; color: var(--on-surface); display: flex; align-items: center; gap: 6px; }
@@ -119,6 +132,9 @@
   .snackbar { position: absolute; left: 12px; right: 12px; bottom: 16px; background: #313033; color: #F4EFF4; border-radius: 4px; padding: 6px 8px 6px 16px; display: flex; align-items: center; min-height: 48px; font-size: 14px; z-index: 25; box-shadow: 0 3px 8px rgba(0,0,0,.3); }
   .snackbar span { flex: 1; }
   .snackbar button { border: 0; background: none; color: #D0BCFF; font: inherit; font-weight: 500; font-size: 14px; padding: 10px 12px; cursor: pointer; }
+  .bgjob { position: absolute; left: 50%; bottom: 150px; transform: translateX(-50%); display: flex; align-items: center; gap: 10px; background: var(--surface, #fff); color: var(--on-surface, #222); border: 1px solid rgba(128,128,128,.35); box-shadow: 0 2px 8px rgba(0,0,0,.2); padding: 6px 8px 6px 12px; border-radius: 18px; font-size: 13px; z-index: 25; white-space: nowrap; }
+  .bgjob .spinner { width: 16px; height: 16px; border-width: 2px; }
+  .bgjob button { border: 0; background: transparent; color: inherit; font-size: 14px; cursor: pointer; padding: 2px 6px; }
   .toast { position: absolute; left: 50%; bottom: 90px; transform: translateX(-50%); background: rgba(50,50,50,.92); color: #fff; padding: 10px 16px; border-radius: 20px; font-size: 14px; z-index: 40; max-width: 85%; text-align: center; line-height: 1.35; }
   .note { font-size: 12px; color: #7A5C00; background: #FFF4D6; border-radius: 8px; padding: 8px 10px; margin-top: 12px; line-height: 1.4; white-space: normal; }
   .phone.snack .fabs { bottom: 76px; }
@@ -188,7 +204,8 @@
 
   <div class="search" id="searchWrap">
     <svg class="s-icon" viewBox="0 0 24 24"><path d="M15.5,14h-0.79l-0.28,-0.27C15.41,12.59 16,11.11 16,9.5 16,5.91 13.09,3 9.5,3S3,5.91 3,9.5 5.91,16 9.5,16c1.61,0 3.09,-0.59 4.23,-1.57l0.27,0.28v0.79l5,4.99L20.49,19l-4.99,-5zM9.5,14C7.01,14 5,11.99 5,9.5S7.01,5 9.5,5 14,7.01 14,9.5 11.99,14 9.5,14z"/></svg>
-    <input id="search" type="text" placeholder="Sök författare, titel, tagg eller ISBN" autocomplete="off">
+    <input id="search" type="text" placeholder="Sök författare, titel, tagg, ursprung, ISBN" autocomplete="off">
+    <button class="icon-btn filter-btn" id="filterBtn" aria-label="Filter: ursprung och taggar"><svg viewBox="0 0 24 24"><path d="M10,18h4v-2h-4v2zM3,6v2h18V6H3zM6,13h12v-2H6v2z"/></svg><span class="badge" id="filterBadge" style="display:none"></span></button>
     <button class="icon-btn clear" id="clearSearch" aria-label="Rensa"><svg viewBox="0 0 24 24"><path d="M19,6.41L17.59,5 12,10.59 6.41,5 5,6.41 10.59,12 5,17.59 6.41,19 12,13.41 17.59,19 19,17.59 13.41,12z"/></svg></button>
   </div>
 
@@ -210,6 +227,7 @@
   </div>
 
   <div class="chips" id="chips"></div>
+  <div class="chips active-filters" id="activeFilters" style="display:none"></div>
   <div class="count" id="count"></div>
   <div class="list" id="list"></div>
 

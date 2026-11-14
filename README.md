@@ -5,7 +5,8 @@ Ett gemensamt bibliotek för två personer. Appen fungerar på Android, iPhone o
 **Funktioner:**
 - Google-inloggning
 - Läst/Oläst
-- Taggar
+- Metataggar (Skönlitteratur, Sakprosa, Fiktion, Serier) och filter på ursprung och övriga taggar
+- Språk, ursprung, sidantal, anteckning och "läst av"
 - Sortering på författare (fällbar) eller titel
 - Sökning
 - Goodreads-länkar
@@ -58,6 +59,17 @@ I Firebase-konsolen: välj **Authentication → Settings → Authorized domains 
 
 ### 8. Fyll biblioteket
 Logga in, välj ⋮ → **Importera Excel** och välj `Bokhylla.xlsx`. Ange taggen *Skönlitteratur*. Böckerna syns direkt på den andra telefonen.
+
+**Excel-format** (rad 1 = rubriker, ordningen spelar ingen roll):
+
+| Kolumn | Exempel | Kommentar |
+|---|---|---|
+| Författare | Chinua Achebe | Förnamn Efternamn |
+| Titel | The African Trilogy | |
+| Taggar | Skönlitteratur, Noveller | kommaseparerade |
+| Ursprung | Svenskt, Nordiskt | författarens, kommaseparerat |
+| Språk | Svenska | Svenska, Engelska, Ryska eller Övrigt |
+| Status, Läst av, Sidor, ISBN, Anteckning | | valfria |
 
 ---
 
