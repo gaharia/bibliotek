@@ -43,19 +43,23 @@
   .appbar .icon-btn:hover { background: rgba(255,255,255,.12); }
   .icon-btn svg { width: 24px; height: 24px; fill: currentColor; }
   .search { margin: 12px 16px 0; position: relative; }
-  .search input { width: 100%; height: 48px; border: 1px solid var(--outline); border-radius: 4px; padding: 0 88px 0 44px; font: inherit; font-size: 16px; background: transparent; outline: none; }
+  .search input { width: 100%; height: 48px; border: 1px solid var(--outline); border-radius: 4px; padding: 0 40px 0 44px; font: inherit; font-size: 16px; background: transparent; outline: none; }
   .search input:focus { border: 2px solid var(--primary); padding-left: 43px; }
   .search .s-icon { position: absolute; left: 12px; top: 12px; width: 24px; height: 24px; fill: var(--on-variant); }
-  .search .clear { position: absolute; right: 44px; top: 0; color: var(--on-variant); display: none; }
-  .search .filter-btn { position: absolute; right: 0; top: 0; color: var(--on-variant); }
-  .search .filter-btn.on { color: var(--primary); }
-  .search .filter-btn .badge { position: absolute; top: 6px; right: 4px; min-width: 16px; height: 16px; border-radius: 8px; background: var(--primary); color: var(--on-primary, #fff); font-size: 11px; line-height: 16px; text-align: center; padding: 0 4px; }
-  .active-filters { padding-top: 0; }
+  .search .clear { position: absolute; right: 0; top: 0; color: var(--on-variant); display: none; }
+  .fab.filter { position: relative; width: 40px; height: 40px; border-radius: 12px; background: var(--surface-variant, #E7E0EC); }
+  .fab.filter svg { fill: var(--on-variant); }
+  .fab.filter.on { background: var(--primary); }
+  .fab.filter.on svg { fill: var(--on-primary, #fff); }
+  .fab.filter .badge { position: absolute; top: -6px; right: -6px; background: #C8553D !important; color: #fff !important; min-width: 16px; height: 16px; border-radius: 8px; background: var(--primary); color: var(--on-primary, #fff); font-size: 11px; line-height: 16px; text-align: center; padding: 0 4px; }
+  .active-filters { padding-top: 0; flex-wrap: wrap; overflow: visible; }
   #chips { flex-wrap: wrap; overflow: visible; gap: 6px; padding: 8px 16px 4px; }
   #chips .chip { height: 30px; padding: 0 10px; font-size: 13px; gap: 4px; }
   #chips .chip small { font-size: 11px; opacity: .7; font-weight: 400; }
   .chip.removable::before { content: none; }
   .chip.toggle { border-style: dashed; font-size: 13px; }
+  .chip.excluded { background: transparent; color: #C8553D; border-color: #C8553D; }
+  .chip.excluded::before { content: none; }
   .filters .f-head { display: flex; align-items: baseline; gap: 8px; margin: 12px 0 6px; font-weight: 600; }
   .filters .f-head small { font-weight: 400; color: var(--on-variant); font-size: 12px; }
   .filters .sugg { display: flex; flex-wrap: wrap; gap: 6px; }
@@ -210,7 +214,6 @@
   <div class="search" id="searchWrap">
     <svg class="s-icon" viewBox="0 0 24 24"><path d="M15.5,14h-0.79l-0.28,-0.27C15.41,12.59 16,11.11 16,9.5 16,5.91 13.09,3 9.5,3S3,5.91 3,9.5 5.91,16 9.5,16c1.61,0 3.09,-0.59 4.23,-1.57l0.27,0.28v0.79l5,4.99L20.49,19l-4.99,-5zM9.5,14C7.01,14 5,11.99 5,9.5S7.01,5 9.5,5 14,7.01 14,9.5 11.99,14 9.5,14z"/></svg>
     <input id="search" type="text" placeholder="Sök författare, titel, tagg, ursprung, ISBN" autocomplete="off">
-    <button class="icon-btn filter-btn" id="filterBtn" aria-label="Filter: ursprung och taggar"><svg viewBox="0 0 24 24"><path d="M10,18h4v-2h-4v2zM3,6v2h18V6H3zM6,13h12v-2H6v2z"/></svg><span class="badge" id="filterBadge" style="display:none"></span></button>
     <button class="icon-btn clear" id="clearSearch" aria-label="Rensa"><svg viewBox="0 0 24 24"><path d="M19,6.41L17.59,5 12,10.59 6.41,5 5,6.41 10.59,12 5,17.59 6.41,19 12,13.41 17.59,19 19,17.59 13.41,12z"/></svg></button>
   </div>
 
@@ -220,14 +223,6 @@
     <button data-s="unread">Olästa</button>
     <button data-s="read">Lästa</button>
   </div>
-  <select class="lang-filter" id="langFilter" aria-label="Filtrera på språk">
-    <option value="all">Alla språk</option>
-    <option value="Svenska">Svenska</option>
-    <option value="Engelska">Engelska</option>
-    <option value="Ryska">Ryska</option>
-    <option value="Övrigt">Övrigt</option>
-    <option value="unknown">Okänt språk</option>
-  </select>
   <button class="wish-btn" id="wishBtn" aria-label="Visa önskelistan"><svg viewBox="0 0 24 24"><path d="M12,21.35l-1.45,-1.32C5.4,15.36 2,12.28 2,8.5 2,5.42 4.42,3 7.5,3c1.74,0 3.41,0.81 4.5,2.09C13.09,3.81 14.76,3 16.5,3 19.58,3 22,5.42 22,8.5c0,3.78 -3.4,6.86 -8.55,11.54L12,21.35z"/></svg><span>Önskelista</span></button>
   </div>
 
@@ -239,6 +234,7 @@
   <div class="fabs">
     <button class="fab mini" id="scanBtn" aria-label="Skanna streckkod"><svg viewBox="0 0 24 24"><path d="M2,5h2v14H2zM5,5h1v14H5zM7,5h3v14H7zM11,5h1v14h-1zM13,5h2v14h-2zM16,5h1v14h-1zM18,5h1v14h-1zM20,5h2v14h-2z"/></svg></button>
     <button class="fab big" id="addBtn" aria-label="Lägg till bok"><svg viewBox="0 0 24 24"><path d="M19,13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg></button>
+    <button class="fab filter" id="filterBtn" aria-label="Filter: språk, ursprung och taggar"><svg viewBox="0 0 24 24"><path d="M10,18h4v-2h-4v2zM3,6v2h18V6H3zM6,13h12v-2H6v2z"/></svg><span class="badge" id="filterBadge" style="display:none"></span></button>
   </div>
 
   <div class="scanner" id="scanner" hidden>

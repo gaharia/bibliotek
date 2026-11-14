@@ -5,22 +5,15 @@
 
 const API = "https://www.wikidata.org/w/api.php?format=json&origin=*&";
 const WDQS = "https://query.wikidata.org/sparql?format=json&query=";
-const CACHE_KEY = "bibliotek-tips-v5";
+const CACHE_KEY = "bibliotek-tips-v7";
 // Språk vars titlar och namnformer jämförs med det man redan har (översättningar).
 const VARIANT_LANGS = "sv|en|mul|de|fr|ru|es|it|da|nb|nn|fi|pl|pt|nl|cs|la|el|ja|ko|zh";
 const CACHE_DAYS = 30;
 // Skönlitterära yrken: romanförfattare, poet, dramatiker, novellförfattare, prosaist,
 // sf-författare, barnboksförfattare, librettist.
 const LIT_OCC = ["Q6625963", "Q49757", "Q214917", "Q15949613", "Q12144794", "Q18844224", "Q4853732", "Q8178443"];
-// Allmänna skribentyrken (författare, essäist). Räcker bara om personen har ett skönlitterärt huvudverk.
+// Allmänna skribentyrken (författare, essäist) – används när typen av författarskap är oklar.
 const GEN_OCC = ["Q36180", "Q482980", "Q11774202"];
-// Yrken som tyder på att personen främst är något annat (filosof, skådespelare, regissör,
-// forskare, musiker). Då krävs ett skönlitterärt huvudverk även om ett författaryrke finns.
-const OTHER_OCC = ["Q4964182", "Q33999", "Q10800557", "Q2259451", "Q2526255", "Q3455803", "Q28389", "Q901", "Q169470", "Q170790", "Q36834", "Q177220", "Q639669", "Q82955"];
-// Typer av verk som räknas som skönlitteratur.
-// ("litterärt verk" Q7725634 är för brett – Wikidata använder det även för filosofi och essäer.)
-// Genrer (P136): poesi, drama.
-const LIT_WORK = ["Q482", "Q25372", "Q8261", "Q49084", "Q5185279", "Q25379", "Q1279564", "Q12106333", "Q149537", "Q37484", "Q699", "Q24723", "Q116476516"];
 
 async function getJson(url, ms = 15000) {
   const ctl = new AbortController();
@@ -41,6 +34,11 @@ async function entities(ids, props = "labels|sitelinks|claims", languages = "sv|
     Object.assign(out, j.entities || {});
   }
   return out;
+}
+// Som search(), men returnerar även totalt antal träffar (för att avgöra hur bred en genre är).
+async function searchCount(query, limit = 25) {
+  const j = await wd({ action: "query", list: "search", srsearch: query, srlimit: limit, srnamespace: 0, srinfo: "totalhits", srprop: "" });
+  return { ids: ((j.query && j.query.search) || []).map((x) => x.title), total: (j.query && j.query.searchinfo && j.query.searchinfo.totalhits) || 0 };
 }
 async function search(query, limit = 50) {
   const j = await wd({ action: "query", list: "search", srsearch: query, srlimit: limit, srnamespace: 0 });
@@ -68,29 +66,6 @@ const variants = (e) => {
   return [...out].filter(Boolean);
 };
 const popularity = (e) => Object.keys((e && e.sitelinks) || {}).length;
-const hasLitOcc = (e) => claimIds(e, "P106").some((o) => LIT_OCC.includes(o));
-const hasGenOcc = (e) => claimIds(e, "P106").some((o) => GEN_OCC.includes(o));
-// Behåll bara skönlitterära författare. Den som bara står som "författare"/"essäist"
-// (t.ex. filosofer och forskare) måste ha ett skönlitterärt verk bland sina huvudverk.
-async function fictionWriters(ents) {
-  const other = (e) => claimIds(e, "P106").some((o) => OTHER_OCC.includes(o));
-  const unsure = Object.values(ents).filter((e) => e && (hasGenOcc(e) || hasLitOcc(e)) && (!hasLitOcc(e) || other(e)));
-  const workIds = unsure.flatMap((e) => claimIds(e, "P800").slice(0, 5));
-  const works = workIds.length ? await entities(workIds, "claims").catch(() => ({})) : {};
-  const kinds = (w) => [...claimIds(works[w], "P31"), ...claimIds(works[w], "P136")];
-  const ok = new Set();
-  for (const e of Object.values(ents)) {
-    if (!e || !claimIds(e, "P31").includes("Q5")) continue;
-    const top = claimIds(e, "P800").slice(0, 5);
-    if (hasLitOcc(e) && !other(e)) ok.add(e.id);
-    // Skönlitterärt yrke + annat yrke (t.ex. Tolstoj som också är filosof): räcker med "litterärt verk".
-    else if (hasLitOcc(e) && top.some((w) => kinds(w).some((t) => t === "Q7725634" || LIT_WORK.includes(t)))) ok.add(e.id);
-    // Bara "författare"/"essäist" (t.ex. Kant): kräver roman, dikt, pjäs, novell eller liknande.
-    else if (hasGenOcc(e) && top.some((w) => kinds(w).some((t) => LIT_WORK.includes(t)))) ok.add(e.id);
-  }
-  return ok;
-}
-
 // ---------- Jämförelse med det man redan har ----------
 export function normTitle(s) {
   return String(s || "").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "")
@@ -128,12 +103,13 @@ function findAuthor(name) {
   const key = normName(name);
   if (!authorMemo.has(key)) {
     authorMemo.set(key, (async () => {
-      const j = await wd({ action: "wbsearchentities", search: name, language: "sv", uselang: "sv", type: "item", limit: 7 });
+      const j = await wd({ action: "wbsearchentities", search: name, language: "sv", uselang: "sv", type: "item", limit: 4 });
       const ids = (j.search || []).map((s) => s.id);
       if (!ids.length) return null;
       const ents = await entities(ids, "claims|sitelinks|labels");
-      for (const id of ids) if (claimIds(ents[id], "P31").includes("Q5")) return ents[id];
-      return null;
+      // Flera personer kan heta likadant: välj den mest kända.
+      const humans = ids.map((id) => ents[id]).filter((e) => claimIds(e, "P31").includes("Q5"));
+      return humans.sort((a, b) => popularity(b) - popularity(a))[0] || null;
     })().catch((e) => { authorMemo.delete(key); throw e; }));
   }
   return authorMemo.get(key);
@@ -176,66 +152,181 @@ export async function getWorks(name, { refresh = false } = {}) {
 }
 
 // ---------- Liknande och kompletterande författare ----------
-async function eraPeers(author) {
-  // Romanförfattare, poeter och dramatiker från samma land, födda inom ±15 år.
-  const q = `SELECT ?b ?sl WHERE {
-    { SELECT ?b (MAX(?s) AS ?sl) WHERE {
-      wd:${author.id} wdt:P27 ?c; wdt:P569 ?bd.
-      VALUES ?occ { wd:Q6625963 wd:Q49757 wd:Q214917 }
-      ?b wdt:P106 ?occ; wdt:P27 ?c; wdt:P569 ?bd2; wikibase:sitelinks ?s.
-      FILTER(?b != wd:${author.id}) FILTER(ABS(YEAR(?bd2) - YEAR(?bd)) <= 15) FILTER(?s >= 5)
-    } GROUP BY ?b ORDER BY DESC(?sl) LIMIT 15 } }`;
-  const j = await getJson(WDQS + encodeURIComponent(q), 30000);
-  return j.results.bindings.map((b) => b.b.value.split("/").pop());
+// Allt hämtas parallellt och avbryts efter högst ~5 s; det som hunnit hämtas visas.
+// kind: "fiction" (skönlitteratur), "nonfiction" (sakprosa) eller "any" – styrs av dina egna taggar.
+// Yrken som tyder på sakprosa (inte de generella "författare"/"skribent").
+const NONFIC_OCC = ["Q14467526", "Q11774202", "Q1930187", "Q4964182", "Q201788", "Q2306091", "Q1238570", "Q188094", "Q4263842",
+  "Q1086863", "Q15253558", "Q4773904", "Q212980", "Q1792450", "Q18814623", "Q6430706"];
+// Ämnesord i Open Library som säger för lite för att jämföra på.
+const OL_GENERIC = /^(sweden|russia|france|germany|england|great britain|united states|europe|human beings|man-woman relationships|interpersonal relations|women|men|families|family|love|death|social life and customs|history and criticism|fiction|literature|history|biography|criticism|translations?|accessible book|protected daisy|in library|large type books|lending library|open_syllabus|nyt:|new york times|reading level|swedish|english|american|french|german|russian|general|textbooks?|social conditions|politics and government|juvenile|essays?$|ficci|roman|novela|romans|fiction, general|literary fiction|classic|classics|long now|overdrive|internet archive|readers)/i;
+
+const within = (p, ms, fallback) => Promise.race([p.catch(() => fallback), new Promise((r) => setTimeout(() => r(fallback), Math.max(0, ms)))]);
+
+// Open Library: författarens mest specifika ämnen → andra författare med samma ämnen.
+async function olSubjectPeers(name, kind) {
+  const w = await getJson("https://openlibrary.org/search.json?author=" + encodeURIComponent(name) + "&fields=subject&limit=15", 4000);
+  const count = new Map();
+  for (const d of w.docs || []) for (const sub of (d.subject || []).slice(0, 25)) {
+    const t = sub.trim();
+    if (t.length < 4 || t.length > 40 || OL_GENERIC.test(t) || /\d{3}/.test(t)) continue;
+    count.set(t, (count.get(t) || 0) + 1);
+  }
+  const subjects = [...count.entries()].filter(([, n]) => n >= 2).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([t]) => t);
+  if (!subjects.length) return { subjects: [], names: new Map() };
+  const names = new Map();
+  const extra = kind === "fiction" ? "&subject=fiction" : "";
+  await Promise.all(subjects.map(async (sub) => {
+    const r = await getJson("https://openlibrary.org/search.json?subject=" + encodeURIComponent(sub) + extra + "&fields=author_name&limit=100", 4000).catch(() => ({}));
+    for (const d of r.docs || []) for (const a of (d.author_name || []).slice(0, 1)) {
+      if (normName(a) === normName(name)) continue;
+      const cur = names.get(a) || { n: 0, subs: new Set() };
+      cur.n++; cur.subs.add(sub); names.set(a, cur);
+    }
+  }));
+  return { subjects, names };
 }
 
-export async function getSimilar(name, { refresh = false } = {}) {
-  if (!refresh) { const c = cached("similar", name); if (c) return c; }
-  const author = await findAuthor(name);
-  if (!author) { const d = { found: false, similar: [] }; store("similar", name, d); return d; }
-  const reasons = new Map();
-  const add = (id, why) => {
-    if (id === author.id) return;
-    if (!reasons.has(id)) reasons.set(id, new Set());
-    reasons.get(id).add(why);
+// Sökfilter (CirrusSearch) för typ av författare, så att kandidaterna inte behöver hämtas i sin helhet
+// (en känd författares fullständiga Wikidata-post kan vara flera hundra kB).
+const occFilter = (ids) => "haswbstatement:" + ids.map((o) => "P106=" + o).join("|P106=");
+const KIND_FILTER = {
+  // Skådespelare, regissörer och musiker som också skrivit något hålls utanför.
+  fiction: occFilter(LIT_OCC) + " -haswbstatement:P106=Q33999 -haswbstatement:P106=Q2526255 -haswbstatement:P106=Q177220 -haswbstatement:P106=Q639669",
+  nonfiction: occFilter(NONFIC_OCC),
+  any: occFilter([...LIT_OCC, ...GEN_OCC, ...NONFIC_OCC])
+};
+const BROAD_GENRE = /^(skönlitteratur|fiktion|barnlitteratur|ungdomslitteratur|roman|novell|poesi|lyrik|essä|icke-fiktion|sakprosa|drama|prosa|litteratur|fiction|non-fiction|novel|poetry|essay|children's literature|literary fiction)$/i;
+
+// Födelseår via Wikidatas REST-API: ett litet anrop per person i stället för hela posten.
+// Högst 8 anrop åt gången, för att inte belasta Wikidata (som annars svarar "för många anrop").
+async function birthYears(ids) {
+  const out = {}, queue = [...ids];
+  const worker = async () => {
+    while (queue.length) {
+      const id = queue.shift();
+      try {
+        const j = await getJson(`https://www.wikidata.org/w/rest.php/wikibase/v1/entities/items/${id}/statements?property=P569`, 2500);
+        const t = j.P569 && j.P569[0] && j.P569[0].value && j.P569[0].value.content && j.P569[0].value.content.time;
+        if (t) out[id] = parseInt(t.slice(0, 5), 10);
+      } catch { /* hoppa över */ }
+    }
   };
-  claimIds(author, "P737").forEach((id) => add(id, "Inspirerade författaren"));
-  (await search(`haswbstatement:P737=${author.id}`, 50).catch(() => [])).forEach((id) => add(id, "Påverkad av författaren"));
-  const movements = claimIds(author, "P135").slice(0, 2);
-  const movementNames = movements.length ? await entities(movements, "labels") : {};
-  for (const m of movements) {
-    const n = label(movementNames[m]);
-    (await search(`haswbstatement:P135=${m} haswbstatement:P31=Q5`, 50).catch(() => []))
-      .forEach((id) => add(id, n ? `Samma litterära rörelse: ${n}` : "Samma litterära rörelse"));
+  await Promise.all(Array.from({ length: Math.min(8, ids.length) }, worker));
+  return out;
+}
+
+// Sökning sorterad på antal inkommande länkar (≈ hur känd personen är).
+async function rankedSearch(query, limit = 30) {
+  const j = await wd({ action: "query", list: "search", srsearch: query, srlimit: limit, srnamespace: 0, srsort: "incoming_links_desc", srinfo: "totalhits", srprop: "" });
+  return { ids: (j.query && j.query.search || []).map((s) => s.title), total: (j.query && j.query.searchinfo && j.query.searchinfo.totalhits) || 0 };
+}
+
+export async function getSimilar(name, { refresh = false, kind = "any" } = {}) {
+  const ck = kind + ":" + name;
+  if (!refresh) { const c = cached("similar", ck); if (c) return c; }
+  const t0 = Date.now();
+  const left = () => 5000 - (Date.now() - t0);
+  const KF = KIND_FILTER[kind] || KIND_FILTER.any;
+  const olP = within(olSubjectPeers(name, kind), 4500, { subjects: [], names: new Map() });
+  const author = await within(findAuthor(name), 2500, null);
+  const cand = new Map(); // id → { reasons:Set, rank:number, direct, specific }
+  const add = (id, why, rank = 30, extra = {}) => {
+    if (!author || id === author.id) return;
+    const c = cand.get(id) || { reasons: new Set(), rank: 0, direct: false, specific: 0, movement: false };
+    c.reasons.add(why);
+    c.rank = Math.max(c.rank, Math.max(0, 40 - rank));
+    if (extra.direct) c.direct = true;
+    if (extra.specific) c.specific++;
+    if (extra.movement) c.movement = true;
+    cand.set(id, c);
+  };
+
+  if (author) {
+    const influences = claimIds(author, "P737");
+    const movements = claimIds(author, "P135").slice(0, 2);
+    const topWorks = claimIds(author, "P800").slice(0, 5);
+    // Samma land/epok-sökningen använder författarens egna yrken (t.ex. journalist), så att
+    // en journalist inte får lingvister bara för att de också räknas som sakprosa.
+    const kindOcc = kind === "fiction" ? LIT_OCC : kind === "nonfiction" ? NONFIC_OCC : [...LIT_OCC, ...GEN_OCC, ...NONFIC_OCC];
+    const ownOcc = claimIds(author, "P106").filter((o) => kindOcc.includes(o) && !GEN_OCC.includes(o)).slice(0, 4);
+    // Politiker hålls utanför (många är också journalister eller författare).
+    const eraKF = (ownOcc.length ? occFilter(ownOcc) + (kind === "fiction" ? KIND_FILTER.fiction.slice(occFilter(LIT_OCC).length) : "") : KF) + " -haswbstatement:P106=Q82955";
+    influences.forEach((id, i) => add(id, "Inspirerade författaren", i, { direct: true }));
+
+    // Reserv för författare utan kända influenser eller rörelser: samma land/språk och epok.
+    const eraP = (influences.length || movements.length) ? Promise.resolve([]) : within((async () => {
+      const born = year(author, "P569"), country = claimIds(author, "P27")[0], lang = claimIds(author, "P1412")[0];
+      if (!born || (!country && !lang)) return [];
+      // Först författarens egna yrken, sedan bredare (alla av samma typ) om det behövs.
+      const broadKF = KF + " -haswbstatement:P106=Q82955";
+      const qs = [country && `haswbstatement:P27=${country} ${eraKF}`, country && eraKF !== broadKF && `haswbstatement:P27=${country} ${broadKF}`,
+        lang && `haswbstatement:P1412=${lang} ${eraKF}`].filter(Boolean);
+      const res = await Promise.all(qs.map((q, i) => rankedSearch(q, i < 2 ? 30 : 15).catch(() => ({ ids: [] }))));
+      const ids = [...new Set(res.flatMap((r) => r.ids))].filter((id) => id !== author.id).slice(0, 50);
+      const [births, cl] = await Promise.all([birthYears(ids), country ? entities([country], "labels").catch(() => ({})) : {}]);
+      const cn = label(cl[country]);
+      return ids.filter((id) => births[id] && Math.abs(births[id] - born) <= 20)
+        .map((id, i) => [id, cn ? `Samma land och epok (${cn})` : "Samma land och epok", i]);
+    })(), left() - 1200, []);
+
+    const [influenced, movRes, worksEnt, movLabels] = await Promise.all([
+      within(rankedSearch(`haswbstatement:P737=${author.id} ${KF}`, 30), left() - 2600, { ids: [] }),
+      Promise.all(movements.map((m) => within(rankedSearch(`haswbstatement:P135=${m} ${KF}`, 30), left() - 2600, { ids: [] }))),
+      topWorks.length ? within(entities(topWorks, "claims"), left() - 2600, {}) : {},
+      movements.length ? within(entities(movements, "labels"), left() - 2600, {}) : {}
+    ]);
+    influenced.ids.forEach((id, i) => add(id, "Påverkad av författaren", i, { direct: true }));
+    movements.forEach((m, i) => {
+      const n = label(movLabels[m]);
+      (movRes[i].ids || []).forEach((id, r) => add(id, n ? `Samma rörelse: ${n}` : "Samma rörelse", r, { movement: true }));
+    });
+
+    // Genrer: egna + sådana som går igen i minst två huvudverk. Breda genrer hoppas över.
+    const wc = new Map();
+    topWorks.forEach((w) => new Set(claimIds(worksEnt[w], "P136")).forEach((g) => wc.set(g, (wc.get(g) || 0) + 1)));
+    const genres = [...new Set([...claimIds(author, "P136"), ...[...wc].filter(([, n]) => n >= 2).map(([g]) => g)])].slice(0, 4);
+    if (genres.length && left() > 1200) {
+      const [gl, res] = await Promise.all([
+        within(entities(genres, "labels"), left() - 1000, {}),
+        Promise.all(genres.map((g) => within(rankedSearch(`haswbstatement:P136=${g} ${KF}`, 30), left() - 1000, { ids: [], total: 0 })))
+      ]);
+      genres.forEach((g, i) => {
+        const n = label(gl[g]);
+        if (!res[i].total || res[i].total > 800 || BROAD_GENRE.test(n)) return;
+        res[i].ids.forEach((id, r) => add(id, n ? `Samma genre: ${n}` : "Samma genre", r, { specific: true }));
+      });
+    }
+    const era = await eraP;
+    if (cand.size < 15) for (const [id, why, r] of era.slice(0, 30)) add(id, why, r);
   }
 
-  const ents = await entities([...reasons.keys()], "labels|aliases|sitelinks|claims", VARIANT_LANGS);
-  const fiction = await fictionWriters(ents);
+  // Namn (och alternativa namn, för att kunna sålla bort sådant du redan har) – lätta anrop.
   let out = [];
-  for (const [id, set] of reasons) {
-    const e = ents[id];
-    if (!e || !fiction.has(id)) continue;
-    const why = [...set];
-    const direct = why.some((w) => w.startsWith("Inspirerade") || w.startsWith("Påverkad"));
-    out.push({ name: label(e), names: variants(e), reasons: why, score: popularity(e) + (direct ? 150 : 0) + (why.length - 1) * 50 });
+  const ids = [...cand.keys()].slice(0, 120);
+  if (ids.length && left() > 150) {
+    const chunks = [];
+    for (let i = 0; i < ids.length; i += 50) chunks.push(ids.slice(i, i + 50));
+    const parts = await Promise.all(chunks.map((c) => within(entities(c, "labels|aliases", "sv|en|mul"), Math.max(left() - 100, 400), {})));
+    const ents = Object.assign({}, ...parts);
+    for (const [id, c] of cand) {
+      const e = ents[id], n = label(e);
+      if (!n) continue;
+      out.push({ name: n, names: variants(e), reasons: [...c.reasons],
+        score: c.rank + (c.direct ? 150 : 0) + c.specific * 90 + (c.movement ? 60 : 0) + (c.reasons.size - 1) * 60 });
+    }
   }
 
-  if (out.length < 6) {
-    try {
-      const peers = await eraPeers(author);
-      const pe = await entities(peers.filter((id) => !reasons.has(id)), "labels|aliases|sitelinks|claims", VARIANT_LANGS);
-      const peFiction = await fictionWriters(pe);
-      const country = label((await entities(claimIds(author, "P27").slice(0, 1), "labels"))[claimIds(author, "P27")[0]]);
-      for (const id of peers) {
-        const e = pe[id];
-        if (!e || !peFiction.has(id)) continue;
-        out.push({ name: label(e), names: variants(e), reasons: [country ? `Samma epok och land (${country})` : "Samma epok och land"], score: popularity(e) });
-      }
-    } catch (e) { /* frågetjänsten svarade inte – visa det som finns */ }
+  // Open Library-ämnen förstärker kandidater som redan hittats (dess egna namnlistor är för brusiga).
+  const ol = await olP;
+  for (const [n, v] of ol.names) {
+    const hit = out.find((x) => normName(x.name) === normName(n) || (x.names || []).some((y) => normName(y) === normName(n)));
+    if (!hit) continue;
+    hit.score += 60 + v.n * 10;
+    hit.reasons.push("Liknande ämnen: " + [...v.subs].slice(0, 2).join(", "));
   }
-  out = out.filter((s) => s.name).sort((a, b) => b.score - a.score).slice(0, 40);
-  const data = { found: true, similar: out };
-  store("similar", name, data);
+  out = out.sort((a, b) => b.score - a.score).slice(0, 40);
+  const data = { found: !!author || out.length > 0, similar: out, ms: Date.now() - t0 };
+  if (out.length) store("similar", ck, data);
   return data;
 }
 

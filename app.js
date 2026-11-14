@@ -268,10 +268,14 @@ const selectedTags = new Set();     // övriga taggar (alla måste finnas)
 const selectedMeta = new Set();     // metataggar (någon av dem)
 const selectedOrigins = new Set();  // ursprung (något av dem)
 let includePolitics = false;
+const excludedTags = new Set();     // taggar som filtreras bort (andra trycket i filterpanelen)
+const excludedOrigins = new Set();  // ursprung som filtreras bort
 let sortMode = "author";
 let statusFilter = "all";
 let statusReader = null; // null = vem som helst, annars "David"/"Felicia"
 let langFilter = "all";
+// Okänt språk räknas som Övrigt.
+const langOf = (b) => (["Svenska", "Engelska", "Ryska"].includes(b.language) ? b.language : "Övrigt");
 const expanded = new Set();
 let currentSelection = [];
 
@@ -300,11 +304,12 @@ function matches(b, q) {
   if (selectedMeta.size && !b.tags.some((t) => selectedMeta.has(t))) return false;
   if (selectedMeta.has("Sakprosa") && !includePolitics && politicsOnly(b)) return false;
   if (selectedOrigins.size && !b.origin.some((o) => selectedOrigins.has(o))) return false;
+  if (excludedOrigins.size && b.origin.some((o) => excludedOrigins.has(o))) return false;
+  if (excludedTags.size && b.tags.some((t) => excludedTags.has(t))) return false;
   for (const t of selectedTags) if (!b.tags.includes(t)) return false;
   if (statusFilter === "read" && !(statusReader ? (b.readBy || []).includes(statusReader) : b.read)) return false;
   if (statusFilter === "unread" && (statusReader ? (b.readBy || []).includes(statusReader) : b.read)) return false;
-  if (langFilter === "unknown" && b.language) return false;
-  if (langFilter !== "all" && langFilter !== "unknown" && b.language !== langFilter) return false;
+  if (langFilter !== "all" && langOf(b) !== langFilter) return false;
   if (!q) return true;
   return b.author.toLowerCase().includes(q) || displayAuthor(b.author).toLowerCase().includes(q) || b.title.toLowerCase().includes(q) ||
     (b.isbn || "").includes(q) || b.tags.some((t) => t.toLowerCase().includes(q)) || b.origin.some((o) => o.toLowerCase().includes(q)) ||
@@ -343,21 +348,25 @@ function renderChips() {
   }
   // Rad 4: aktiva filter från filterpanelen
   const act = $("activeFilters");
-  const active = [...[...selectedOrigins].map((o) => ["o", o]), ...[...selectedTags].map((t) => ["t", t])];
+  const active = [
+    ...(langFilter !== "all" ? [["l", langFilter]] : []),
+    ...[...selectedOrigins].map((o) => ["o", o]), ...[...excludedOrigins].map((o) => ["xo", o]),
+    ...[...selectedTags].map((t) => ["t", t]), ...[...excludedTags].map((t) => ["xt", t])];
   act.style.display = active.length ? "flex" : "none";
   act.innerHTML = "";
+  const sets = { o: selectedOrigins, t: selectedTags, xo: excludedOrigins, xt: excludedTags };
   for (const [k, v] of active) {
     const c = document.createElement("button");
-    c.className = "chip on removable";
-    c.textContent = v + " ✕";
-    c.onclick = () => { (k === "o" ? selectedOrigins : selectedTags).delete(v); renderChips(); renderList(); };
+    c.className = "chip removable " + (k.startsWith("x") ? "excluded" : "on");
+    c.textContent = (k.startsWith("x") ? "Ej " : "") + v + " ✕";
+    c.onclick = () => { if (k === "l") langFilter = "all"; else sets[k].delete(v); renderChips(); renderList(); };
     act.appendChild(c);
   }
   if (active.length > 1) {
     const r = document.createElement("button");
     r.className = "btn-text small";
     r.textContent = "Rensa";
-    r.onclick = () => { selectedOrigins.clear(); selectedTags.clear(); renderChips(); renderList(); };
+    r.onclick = clearFilters;
     act.appendChild(r);
   }
   const badge = $("filterBadge");
@@ -366,32 +375,62 @@ function renderChips() {
   $("filterBtn").classList.toggle("on", active.length > 0);
 }
 
-// Filterpanel: Ursprung (något av) och Taggar (alla valda).
+function clearFilters() {
+  selectedOrigins.clear(); selectedTags.clear(); excludedOrigins.clear(); excludedTags.clear(); langFilter = "all";
+  renderChips(); renderList();
+}
+// Filterpanel: Språk, Ursprung (något av) och Taggar (alla valda).
+// Tryck en gång = visa bara dessa, två gånger = filtrera bort dem, tre gånger = av.
 function openFilters() {
   const body = document.createElement("div");
   body.className = "filters";
   const draw = () => {
     body.innerHTML = "";
-    const section = (title, hint, entries, set) => {
+    const head = (title, hint) => {
       const h = document.createElement("div");
       h.className = "f-head";
       h.innerHTML = `<span>${esc(title)}</span><small>${esc(hint)}</small>`;
+      body.appendChild(h);
+    };
+    const refresh = () => { draw(); renderChips(); renderList(); };
+    // Språk: ett val åt gången
+    head("Språk", "");
+    const lg = document.createElement("div");
+    lg.className = "sugg";
+    const lc = new Map();
+    for (const b of books) lc.set(langOf(b), (lc.get(langOf(b)) || 0) + 1);
+    for (const [v, label] of [["all", "Alla"], ...["Svenska", "Engelska", "Ryska", "Övrigt"].map((x) => [x, `${x} (${lc.get(x) || 0})`])]) {
+      const c = document.createElement("button");
+      c.className = "chip" + (langFilter === v ? " on" : "");
+      c.textContent = label;
+      c.onclick = () => { langFilter = v; refresh(); };
+      lg.appendChild(c);
+    }
+    body.appendChild(lg);
+    const section = (title, hint, entries, inc, exc) => {
+      head(title, hint);
       const g = document.createElement("div");
       g.className = "sugg";
       for (const [v, n] of entries) {
         const c = document.createElement("button");
-        c.className = "chip" + (set.has(v) ? " on" : "");
-        c.textContent = `${v} (${n})`;
-        c.onclick = () => { set.has(v) ? set.delete(v) : set.add(v); draw(); renderChips(); renderList(); };
+        const st = inc.has(v) ? "on" : exc.has(v) ? "excluded" : "";
+        c.className = "chip " + st;
+        c.textContent = (st === "excluded" ? "Ej " : "") + `${v} (${n})`;
+        c.onclick = () => {
+          if (inc.has(v)) { inc.delete(v); exc.add(v); }
+          else if (exc.has(v)) exc.delete(v);
+          else inc.add(v);
+          refresh();
+        };
         g.appendChild(c);
       }
       if (!entries.length) g.innerHTML = `<p class="muted">Inga ännu.</p>`;
-      body.append(h, g);
+      body.appendChild(g);
     };
-    section("Ursprung", "visar böcker med något av de valda", originCounts(), selectedOrigins);
+    section("Ursprung", "1 tryck: visa · 2: dölj · 3: av", originCounts(), selectedOrigins, excludedOrigins);
     const tags = tagCounts().filter(([t]) => !META.includes(t)).sort((a, b) => b[1] - a[1] || collator.compare(a[0], b[0]));
-    section("Taggar", "visar böcker med alla valda", tags, selectedTags);
-    const n = selectedOrigins.size + selectedTags.size;
+    section("Taggar", "1 tryck: visa (alla valda) · 2: dölj · 3: av", tags, selectedTags, excludedTags);
+    const n = selectedOrigins.size + selectedTags.size + excludedOrigins.size + excludedTags.size + (langFilter !== "all" ? 1 : 0);
     const res = document.createElement("p");
     res.className = "muted";
     res.textContent = `${books.filter((b) => matches(b, query.toLowerCase())).length} böcker matchar`;
@@ -400,7 +439,7 @@ function openFilters() {
       const r = document.createElement("button");
       r.className = "btn-text small";
       r.textContent = "Rensa filter";
-      r.onclick = () => { selectedOrigins.clear(); selectedTags.clear(); draw(); renderChips(); renderList(); };
+      r.onclick = () => { clearFilters(); draw(); };
       body.appendChild(r);
     }
   };
@@ -493,7 +532,7 @@ function refreshAll() {
   $("wishBtn").classList.toggle("on", wish);
   $("wishBtn").querySelector("span").textContent = wishes.length ? `Önskelista (${wishes.length})` : "Önskelista";
   $("statusGroup").style.visibility = wish ? "hidden" : "visible";
-  $("langFilter").style.display = wish ? "none" : "";
+
   $("filterBtn").style.display = wish ? "none" : "";
   if (wish) { $("chips").style.display = "none"; $("activeFilters").style.display = "none"; } else renderChips();
   renderList();
@@ -628,8 +667,8 @@ function field(label, value = "", attrs = "") {
   w.querySelector("input").value = value;
   return w;
 }
-function suggestions(container, labelText, onPick) {
-  const tags = tagCounts().map((c) => c[0]);
+function suggestions(container, labelText, onPick, exclude = []) {
+  const tags = tagCounts().map((c) => c[0]).filter((t) => !exclude.includes(t));
   if (!tags.length) return;
   const l = document.createElement("div");
   l.className = "sugg-label";
@@ -744,7 +783,7 @@ function editBook(book, prefill = null, prefillIsbn = "", fromScan = false, from
   const langRow = document.createElement("div");
   langRow.className = "field-row";
   const lang0 = book ? book.language : (prefill?.language || "");
-  langRow.innerHTML = `<div class="field"><label>Språk</label><select>${["", ...LANGS].map((l) => `<option value="${l}"${l === lang0 ? " selected" : ""}>${l || "Okänt"}</option>`).join("")}</select></div>` +
+  langRow.innerHTML = `<div class="field"><label>Språk</label><select>${LANGS.map((l) => `<option value="${l}"${l === (LANGS.includes(lang0) ? lang0 : "Övrigt") ? " selected" : ""}>${l}</option>`).join("")}</select></div>` +
     `<div class="field"><label>Sidor</label><input class="in-pages" inputmode="numeric" value="${(book ? book.pages : prefill?.pages) || ""}"></div>` +
     `<div class="field"><label>Utgiven</label><input class="in-year" inputmode="numeric" placeholder="år" value="${(book ? book.year : prefill?.year) || ""}"></div>` +
     `<button class="btn-text small fetch-pages">Hämta sidor och år</button>`;
@@ -789,12 +828,28 @@ function editBook(book, prefill = null, prefillIsbn = "", fromScan = false, from
     const cur = parseTags(inG.value).map((x) => x.toLowerCase());
     body.querySelectorAll(".sugg-tags .chip").forEach((c) => c.classList.toggle("on", cur.includes(c.dataset.tag.toLowerCase())));
   };
-  suggestions(body, "Befintliga taggar – tryck för att lägga till eller ta bort", (t) => {
+  // Metataggar för sig (minst en krävs för nya böcker), övriga taggar under.
+  const toggleTag = (t) => {
     const cur = parseTags(inG.value);
     const has = cur.some((x) => x.toLowerCase() === t.toLowerCase());
     inG.value = (has ? cur.filter((x) => x.toLowerCase() !== t.toLowerCase()) : [...cur, t]).join(", ");
     markTags(); growTags();
-  });
+  };
+  {
+    const lab = document.createElement("div");
+    lab.className = "sugg-label";
+    lab.textContent = book ? "Metataggar" : "Metataggar – välj minst en";
+    const g = document.createElement("div");
+    g.className = "sugg sugg-tags sugg-meta";
+    for (const t of META) {
+      const c = document.createElement("button");
+      c.className = "chip"; c.textContent = t; c.dataset.tag = t;
+      c.onclick = () => toggleTag(t);
+      g.appendChild(c);
+    }
+    body.append(lab, g);
+  }
+  suggestions(body, "Övriga taggar – tryck för att lägga till eller ta bort", toggleTag, META);
   inG.addEventListener("input", () => { markTags(); growTags(); });
   markTags();
   requestAnimationFrame(growTags);
@@ -817,8 +872,13 @@ function editBook(book, prefill = null, prefillIsbn = "", fromScan = false, from
       { label: "Avbryt" },
       { label: "Spara", action: () => {
         const author = inA.value.trim(), title = inT.value.trim();
-        if (!author && !title) { toast("Fyll i författare eller titel"); return; }
+        if (!author && !title) { toast("Fyll i författare eller titel"); return false; }
         const tags = parseTags(inG.value), isbn = normalizeIsbn(inI.value);
+        if (!book && !tags.some((t) => META.includes(t))) {
+          toast("Välj minst en metatagg: " + META.join(", "));
+          body.querySelector(".sugg-meta")?.scrollIntoView({ block: "center", behavior: "smooth" });
+          return false;
+        }
         const pages = parseInt(inP.value, 10) || 0, language = selLang.value, note = inNote.value.trim();
         const year = parseInt(inY.value, 10) || 0;
         if (!read) readBy = [];
@@ -840,12 +900,34 @@ function confirmDelete(b) {
     { label: "Ta bort", action: () => deleteBookDoc(b.id) }
   ] });
 }
+// Radera alla: först ett obligatoriskt val om säkerhetskopia, sedan en bekräftelse där man skriver RADERA.
 function confirmDeleteAll() {
   if (!books.length) return;
-  dialog({ title: "Radera alla böcker", body: `Vill du radera alla ${books.length} böcker? Det gäller båda era telefoner och går inte att ångra. Exportera gärna till Excel först.`, buttons: [
+  const n = books.length;
+  dialog({ title: "Säkerhetskopia först?",
+    body: `Du är på väg att radera alla ${n} böcker för er båda. Vill du ladda ner en säkerhetskopia (Excel) innan?`,
+    buttons: [
+      { label: "Avbryt" },
+      { label: "Utan kopia", action: () => setTimeout(() => finalDeleteAll(false), 50) },
+      { label: "Ladda ner kopia", action: () => { exportBooks(books.slice().sort(authorCmp)); setTimeout(() => finalDeleteAll(true), 600); } }
+    ] });
+}
+function finalDeleteAll(backedUp) {
+  const body = document.createElement("div");
+  body.innerHTML = `<p>${backedUp ? "Säkerhetskopian är nedladdad." : "<b>Ingen säkerhetskopia tas.</b>"} Raderingen gäller båda era telefoner och går inte att ångra.</p>
+    <p>Skriv <b>RADERA</b> för att bekräfta.</p>`;
+  const f = field("Bekräfta");
+  body.appendChild(f);
+  const inp = f.querySelector("input");
+  dialog({ title: `Radera alla ${books.length} böcker`, body, buttons: [
     { label: "Avbryt" },
-    { label: "Ta bort", action: () => { runBatches(books.map((b) => (batch) => batch.delete(doc(booksCol, b.id)))); } }
+    { label: "Radera allt", action: () => {
+      if (inp.value.trim().toUpperCase() !== "RADERA") { toast("Skriv RADERA för att bekräfta"); return false; }
+      runBatches(books.map((b) => (batch) => batch.delete(doc(booksCol, b.id))));
+      toast("Alla böcker raderade");
+    } }
   ] });
+  setTimeout(() => inp.focus(), 100);
 }
 
 $("addBtn").onclick = () => (mode === "wish" ? editWish(null) : editBook(null));
@@ -1554,9 +1636,19 @@ function showTips(author, refresh = false) {
     }
   }).catch(() => { worksBox.innerHTML = `<p class="muted">Kunde inte hämta verk just nu. Försök igen senare.</p>`; });
 
-  getSimilar(author, { refresh }).then((data) => {
+  // Typ av författare enligt dina egna taggar på hens böcker: skönlitteratur, sakprosa eller blandat.
+  const mine = books.filter((b) => !isAnthology(b) && anyAuthor(b.author, [author]));
+  const fic = mine.filter((b) => b.tags.some((t) => ["Skönlitteratur", "Fiktion", "Poesi", "Serier"].includes(t))).length;
+  const non = mine.filter((b) => b.tags.includes("Sakprosa")).length;
+  const kind = fic && !non ? "fiction" : non && !fic ? "nonfiction" : fic > 2 * non ? "fiction" : non > 2 * fic ? "nonfiction" : "any";
+  getSimilar(author, { refresh, kind }).then((data) => {
     simBox.innerHTML = "";
-    if (!data.similar.length) { simBox.innerHTML = `<p class="muted">Hittade inga liknande författare i de öppna databaserna.</p>`; return; }
+    if (!data.similar.length) {
+      simBox.innerHTML = data.found
+        ? `<p class="muted">Hittade inga liknande författare i de öppna databaserna.</p>`
+        : `<p class="muted">Hittade inte författaren i Wikidata – den kan saknas där, eller så svarar Wikidata inte just nu. Försök igen senare.</p>`;
+      return;
+    }
     const fresh = data.similar.filter((s) => !ownsAuthor(s.name, s.names || []) && !sameAuthor(s.name, author));
     const ownedCount = data.similar.length - fresh.length;
     if (!fresh.length) simBox.innerHTML = `<p class="muted">Alla föreslagna författare finns redan i ditt bibliotek.</p>`;
@@ -1616,7 +1708,7 @@ $("search").addEventListener("input", (e) => {
   renderList();
 });
 $("clearSearch").onclick = () => { $("search").value = ""; query = ""; $("searchWrap").classList.remove("has-text"); renderList(); };
-$("langFilter").onchange = (e) => { langFilter = e.target.value; renderList(); };
+
 $("filterBtn").onclick = openFilters;
 // Olästa/Lästa: välj vems läsning som gäller (vem som helst, David eller Felicia).
 function setStatus(s, reader) {
