@@ -575,6 +575,8 @@ function renderMenu() {
     ["Skanna streckkod", startScan],
     ["Importera önskelista (Excel)", () => { importTarget = "wish"; $("importInput").click(); }],
     ["Exportera önskelista", exportWishes],
+    ["Fäll ut alla författare", () => { wishes.filter((w) => w.kind === wishKind).forEach((w) => expandedWish.add(groupKey(w))); renderList(); }],
+    ["Fäll ihop alla författare", () => { expandedWish.clear(); renderList(); }],
   ] : [
     ["Skanna streckkod", startScan],
     ["Importera Excel", () => { importTarget = "library"; $("importInput").click(); }],
@@ -1182,7 +1184,8 @@ async function backgroundPages(list) {
       if (Object.keys(f).length) { updateBookDoc(b.id, f); found++; }
     } catch (e) {}
     done++; upd();
-    await new Promise((res) => setTimeout(res, 250));
+    // Open Library ber om högst ett anrop per sekund (utan identifiering); varje bok kan ge 2–3 anrop.
+    await new Promise((res) => setTimeout(res, 2500));
   }
   pill.remove();
   bgPagesRunning = false;
@@ -1434,6 +1437,7 @@ const authorWish = (author) => wishes.find((w) => !w.title && sameAuthor(w.autho
 
 function addWish({ author, title = "", note = "", kind = wishKind, isbn = "" }) {
   if (title ? wishFor(author, title) : authorWish(author)) { toast("Finns redan på önskelistan"); return false; }
+  expandedWish.add(groupKey({ author })); // visa den nya önskningen direkt
   setDoc(doc(wishCol), cleanWish({ author, title, note, kind, isbn, added: Date.now(), updatedBy: user ? user.email : "" })).catch(writeFailed);
   return true;
 }
@@ -1472,7 +1476,8 @@ function renderWishChips() {
     el.appendChild(c);
   }
 }
-const collapsedWish = new Set();
+// Önskelistans författare är stängda från början; "Fäll ut alla" i menyn öppnar dem.
+const expandedWish = new Set();
 function renderWishList() {
   const q = query.toLowerCase();
   const inKind = wishes.filter((w) => w.kind === wishKind);
@@ -1485,15 +1490,19 @@ function renderWishList() {
   const groups = new Map();
   for (const w of sorted) { const k = groupKey(w); if (!groups.has(k)) groups.set(k, []); groups.get(k).push(w); }
   for (const [k, gw] of groups) {
-    const open = q !== "" || !collapsedWish.has(k);
+    const open = q !== "" || expandedWish.has(k);
     const titles = gw.filter((w) => w.title).length;
     const whole = gw.some((w) => !w.title);
     const h = document.createElement("div");
     h.className = "header" + (open ? " open" : "");
-    const info = [titles ? (titles === 1 ? "1 titel" : titles + " titlar") : "", whole ? "författarskapet" : ""].filter(Boolean).join(" · ");
-    h.innerHTML = `${ICON_CHEV}<div class="n">${esc(displayAuthor(gw[0].author) || "Okänd författare")}</div><div class="c">${info}</div>`;
+    // "författarskapet" visas alltid: tydligt med grön bock om man vill läsa hela författarskapet, annars nedtonat.
+    const tt = titles ? (titles === 1 ? "1 titel" : titles + " titlar") + " · " : "";
+    h.innerHTML = `${ICON_CHEV}<div class="n">${esc(displayAuthor(gw[0].author) || "Okänd författare")}</div>` +
+      `<div class="c">${tt}<span class="whole${whole ? " on" : ""}">författarskapet</span></div>` +
+      `<button class="icon-btn whole-btn${whole ? " on" : ""}" aria-label="${whole ? "Ta bort intresse för hela författarskapet" : "Intresserad av hela författarskapet"}" title="${whole ? "Ta bort intresse för hela författarskapet" : "Intresserad av hela författarskapet"}">${whole ? ICON_READ : ICON_UNREAD}</button>`;
+    h.querySelector(".whole-btn").onclick = (e) => { e.stopPropagation(); toggleWholeAuthor(gw[0].author.trim()); };
     addTipsButton(h, gw[0].author.trim());
-    h.onclick = () => { if (query) return; collapsedWish.has(k) ? collapsedWish.delete(k) : collapsedWish.add(k); renderList(); };
+    h.onclick = () => { if (query) return; expandedWish.has(k) ? expandedWish.delete(k) : expandedWish.add(k); renderList(); };
     list.appendChild(h);
     if (!open) continue;
     for (const w of gw) list.appendChild(wishRow(w));
@@ -1508,6 +1517,17 @@ function renderWishList() {
   $("count").innerHTML = `${filtered.length} på önskelistan (${wishKind.toLowerCase()})` + (syncState ? ` <span class="sync">· ${esc(syncState)}</span>` : "");
 }
 
+// Bocken vid "författarskapet": lägg till eller ta bort en önskning om hela författarskapet (i aktuell del).
+function toggleWholeAuthor(author) {
+  const ex = wishes.find((w) => !w.title && w.kind === wishKind && sameAuthor(w.author, author));
+  if (ex) {
+    deleteWish(ex.id);
+    snackbar(`Hela författarskapet borttaget för ${displayAuthor(author)}`, "Ångra",
+      () => setDoc(doc(wishCol, ex.id), cleanWish({ author: ex.author, title: "", note: ex.note, kind: ex.kind, isbn: "", added: ex.added, updatedBy: user ? user.email : "" })).catch(writeFailed));
+  } else {
+    setDoc(doc(wishCol), cleanWish({ author, title: "", note: "", kind: wishKind, isbn: "", added: Date.now(), updatedBy: user ? user.email : "" })).catch(writeFailed);
+  }
+}
 function wishRow(w) {
   const row = document.createElement("div");
   row.className = "row grouped";

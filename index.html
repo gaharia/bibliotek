@@ -96,6 +96,10 @@
   .header.open .chev { transform: rotate(90deg); }
   .header .n { flex: 1; font-size: 16px; font-weight: 700; }
   .header .c { font-size: 12px; font-weight: 500; color: var(--on-variant); }
+  .header .c .whole { opacity: .4; }
+  .header .c .whole.on { opacity: 1; color: var(--on-surface); }
+  .header .whole-btn { color: var(--grey); opacity: .6; }
+  .header .whole-btn.on { color: var(--green); opacity: 1; }
   .empty { padding: 32px; text-align: center; font-size: 16px; line-height: 1.5; color: var(--on-surface); white-space: pre-line; }
   .empty .demo { margin-top: 16px; }
   .fabs { position: absolute; right: 16px; bottom: calc(16px + env(safe-area-inset-bottom)); transition: bottom .2s; display: flex; flex-direction: column; align-items: center; gap: 12px; }
