@@ -36,6 +36,9 @@ const nameException = (a) => NAME_EXCEPTIONS.find(([n, d]) => normName(n) === no
 // Redaktörsmarkering, t.ex. "(red.)", flyttas sist och påverkar inte sorteringen.
 const EDITOR_RE = /\s*\((red|reds|ed|eds|utg)\.?\)\s*$/i;
 const splitEditor = (a) => { const m = a.match(EDITOR_RE); return m ? [a.slice(0, m.index).trim(), m[0].trim()] : [a, ""]; };
+// Prefix som hör till efternamnet: "Ursula K. Le Guin" → "Le Guin, Ursula K.", "Daphne du Maurier" → "du Maurier, Daphne".
+// Småskrivna "de", "von", "van" stannar efter förnamnet enligt bibliotekspraxis: "Beauvoir, Simone de".
+const SURNAME_PREFIX = /^(le|la|les|du|des|Le|La|Les|Du|Des|De|Di|Da|Del|Della|Van|Von|Ten|Ter|Mac|Mc|St\.?)$/;
 function invertOne(a) {
   if (a.includes(",")) return a;
   const p = a.split(" ");
@@ -43,7 +46,9 @@ function invertOne(a) {
   // Suffix som "Jr." följer med förnamnet.
   let last = p.length - 1;
   if (/^(jr|sr|d\.?\s?y|d\.?\s?ä|ii|iii)\.?$/i.test(p[last]) && last > 1) last--;
-  return `${p[last]}, ${p.slice(0, last).concat(p.slice(last + 1)).join(" ")}`;
+  let start = last;
+  while (start - 1 >= 1 && SURNAME_PREFIX.test(p[start - 1])) start--;
+  return `${p.slice(start, last + 1).join(" ")}, ${p.slice(0, start).concat(p.slice(last + 1)).join(" ")}`;
 }
 function displayAuthor(name) {
   const [a, ed] = splitEditor(String(name || "").trim().replace(/\s+/g, " "));
@@ -218,8 +223,13 @@ function listenWishes() {
     if (!err || err.code !== "permission-denied") toast("Synkfel (önskelista): " + (err && err.message ? err.message : err));
   });
 }
+// Önskelistan har två delar: Skönlitteratur och Sakprosa. Äldre önskningar utan del räknas som Skönlitteratur.
+const WISH_KINDS = ["Skönlitteratur", "Sakprosa"];
+let wishKind = "Skönlitteratur";
+const kindFromTags = (tags) => ((tags || []).some((t) => normName(t) === "sakprosa") ? "Sakprosa" : "Skönlitteratur");
 function wishFromDoc(id, d) {
-  return { id, author: String(d.author || ""), title: String(d.title || ""), note: String(d.note || ""), added: Number(d.added) || 0 };
+  return { id, author: String(d.author || ""), title: String(d.title || ""), note: String(d.note || ""), added: Number(d.added) || 0,
+    kind: WISH_KINDS.includes(d.kind) ? d.kind : "Skönlitteratur", isbn: String(d.isbn || "") };
 }
 
 function fromDoc(id, d) {
@@ -239,18 +249,34 @@ function fromDoc(id, d) {
     year: Number(d.year) || 0
   };
 }
+// Databasreglerna har gränser (t.ex. högst 3000 tecken anteckning, 50 taggar, 10 ursprung).
+// En enda bok över gränsen skulle stoppa en hel import, så värdena kortas av innan de sparas.
+const LIMITS = { author: 300, title: 500, isbn: 20, language: 20, note: 3000, tags: 50, origin: 10, readBy: 2 };
+const clip = (v, n) => String(v ?? "").slice(0, n);
+const num = (v) => { const x = Number(v); return Number.isFinite(x) ? Math.round(x) : 0; };
+function cleanFields(f) {
+  const o = { ...f };
+  for (const k of ["author", "title", "isbn", "language", "note"]) if (k in o) o[k] = clip(o[k], LIMITS[k]);
+  if ("tags" in o) o.tags = [...new Set((o.tags || []).map((t) => clip(t, 100)).filter(Boolean))].slice(0, LIMITS.tags);
+  if ("origin" in o) o.origin = [...new Set((o.origin || []).map((t) => clip(t, 100)).filter(Boolean))].slice(0, LIMITS.origin);
+  if ("readBy" in o) o.readBy = [...new Set(o.readBy || [])].filter((n) => READERS.includes(n)).slice(0, LIMITS.readBy);
+  if ("pages" in o) o.pages = Math.max(0, num(o.pages));
+  if ("year" in o) o.year = num(o.year);
+  if ("read" in o) o.read = !!o.read;
+  return o;
+}
 function toData(b) {
-  return {
+  return cleanFields({
     author: b.author, title: b.title, tags: b.tags, read: !!b.read,
     isbn: b.isbn || "", added: b.added || Date.now(), updatedBy: user ? user.email : "",
-    pages: Number(b.pages) || 0, language: b.language || "", note: b.note || "", readBy: b.readBy || [], origin: b.origin || [], year: Number(b.year) || 0
-  };
+    pages: b.pages, language: b.language || "", note: b.note || "", readBy: b.readBy || [], origin: b.origin || [], year: b.year
+  });
 }
 // Skrivningar sparas lokalt direkt och synkas när det finns nät.
 function writeFailed(err) { toast("Kunde inte spara: " + (err && err.message ? err.message : err)); }
 function addBookDoc(b) { const ref = doc(booksCol); setDoc(ref, toData(b)).catch(writeFailed); return ref.id; }
 function updateBookDoc(id, fields) {
-  updateDoc(doc(booksCol, id), { ...fields, updatedBy: user ? user.email : "" }).catch(writeFailed);
+  updateDoc(doc(booksCol, id), cleanFields({ ...fields, updatedBy: user ? user.email : "" })).catch(writeFailed);
 }
 function deleteBookDoc(id) { deleteDoc(doc(booksCol, id)).catch(writeFailed); }
 async function runBatches(ops) {
@@ -265,7 +291,7 @@ async function runBatches(ops) {
 // ---------- Tillstånd ----------
 let query = "";
 const selectedTags = new Set();     // övriga taggar (alla måste finnas)
-const selectedMeta = new Set();     // metataggar (någon av dem)
+const selectedMeta = new Set(["Skönlitteratur"]); // metataggar (någon av dem) – Skönlitteratur är förvald vid start
 const selectedOrigins = new Set();  // ursprung (något av dem)
 let includePolitics = false;
 const excludedTags = new Set();     // taggar som filtreras bort (andra trycket i filterpanelen)
@@ -322,6 +348,8 @@ function renderChips() {
   const origins = new Map(originCounts());
   for (const t of [...selectedTags]) if (!counts.has(t)) selectedTags.delete(t);
   for (const o of [...selectedOrigins]) if (!origins.has(o)) selectedOrigins.delete(o);
+  for (const t of [...excludedTags]) if (!counts.has(t)) excludedTags.delete(t);
+  for (const o of [...excludedOrigins]) if (!origins.has(o)) excludedOrigins.delete(o);
   // Rad 3: metataggar
   const el = $("chips");
   el.style.display = books.length ? "flex" : "none";
@@ -531,10 +559,10 @@ function refreshAll() {
   document.querySelector(".appbar h1").textContent = wish ? "Önskelista" : "Bibliotek";
   $("wishBtn").classList.toggle("on", wish);
   $("wishBtn").querySelector("span").textContent = wishes.length ? `Önskelista (${wishes.length})` : "Önskelista";
-  $("statusGroup").style.visibility = wish ? "hidden" : "visible";
+  $("statusGroup").style.display = wish ? "none" : "";
 
   $("filterBtn").style.display = wish ? "none" : "";
-  if (wish) { $("chips").style.display = "none"; $("activeFilters").style.display = "none"; } else renderChips();
+  if (wish) { renderWishChips(); $("activeFilters").style.display = "none"; } else renderChips();
   renderList();
   renderMenu();
 }
@@ -553,7 +581,7 @@ function renderMenu() {
     ["Exportera Excel", chooseExport],
     ["Sortera", chooseSort],
     [`Hämta sidantal och år (${books.filter(needsFill).length} saknas)`, fetchAllPages],
-    [`Läsare på den här enheten: ${currentReader() || "inte vald"}`, () => askReader(() => renderMenu())],
+    [`Läsare på den här enheten: ${currentReader() || "inte vald"}`, () => askReader(() => refreshAll())],
   ];
   const oldOrigin = books.filter((b) => b.tags.some((t) => ORIGINS.includes(t))).length;
   if (!wish && oldOrigin) items.push([`Flytta ursprungstaggar till Ursprung (${oldOrigin})`, migrateOriginTags]);
@@ -707,7 +735,7 @@ function toggleRead(b) {
   withReader((me) => {
     const by = b.readBy || [];
     let readBy, read, msg;
-    if (by.includes(me) || (b.read && !by.length)) {
+    if (by.includes(me)) {
       // Ta bort mig; boken är fortfarande läst om någon annan har läst den.
       readBy = by.filter((n) => n !== me);
       read = readBy.length > 0;
@@ -725,8 +753,8 @@ function toggleRead(b) {
 // ---------- Lägg till / redigera ----------
 function editBook(book, prefill = null, prefillIsbn = "", fromScan = false, fromWishId = null) {
   const body = document.createElement("div");
-  const fA = field("Författare", book ? book.author : (prefill?.author || ""));
-  const fT = field("Titel", book ? book.title : (prefill?.title || ""));
+  const fA = field("Författare", book ? book.author : (prefill?.author || ""), 'maxlength="300"');
+  const fT = field("Titel", book ? book.title : (prefill?.title || ""), 'maxlength="500"');
   const fI = field("ISBN", book ? (book.isbn || "") : prefillIsbn, 'inputmode="numeric"');
   const sw = document.createElement("div");
   sw.className = "switch-row";
@@ -760,7 +788,7 @@ function editBook(book, prefill = null, prefillIsbn = "", fromScan = false, from
   const fG = document.createElement("div");
   fG.className = "field";
   fG.innerHTML = `<label>Taggar (separera med kommatecken)</label><textarea class="tags-input" rows="1"></textarea>`;
-  fG.querySelector("textarea").value = book ? book.tags.join(", ") : "";
+  fG.querySelector("textarea").value = book ? book.tags.join(", ") : (prefill?.tags || []).join(", ");
   // Ursprung (författarens), ett eller flera
   let origin = book ? [...book.origin] : [...(prefill?.origin || [])];
   const fO = document.createElement("div");
@@ -774,7 +802,10 @@ function editBook(book, prefill = null, prefillIsbn = "", fromScan = false, from
       const c = document.createElement("button");
       c.className = "chip" + (origin.includes(o) ? " on" : "");
       c.textContent = o;
-      c.onclick = () => { origin = origin.includes(o) ? origin.filter((x) => x !== o) : [...origin, o]; drawOrigins(); };
+      c.onclick = () => {
+        if (!origin.includes(o) && origin.length >= LIMITS.origin) { toast(`Högst ${LIMITS.origin} ursprung`); return; }
+        origin = origin.includes(o) ? origin.filter((x) => x !== o) : [...origin, o]; drawOrigins();
+      };
       oBox.appendChild(c);
     }
   };
@@ -790,7 +821,7 @@ function editBook(book, prefill = null, prefillIsbn = "", fromScan = false, from
   const selLang = langRow.querySelector("select"), inP = langRow.querySelector(".in-pages"), inY = langRow.querySelector(".in-year");
   const fNote = document.createElement("div");
   fNote.className = "field";
-  fNote.innerHTML = `<label>Anteckning</label><textarea rows="3"></textarea>`;
+  fNote.innerHTML = `<label>Anteckning</label><textarea rows="3" maxlength="3000"></textarea>`;
   const inNote = fNote.querySelector("textarea");
   inNote.value = book ? (book.note || "") : "";
   body.append(fA, fT, fI, langRow, fO, sw, who, fG, fNote);
@@ -1012,7 +1043,7 @@ function onBarcode(raw) {
       prog.close();
       if (existing) toast(`Du har redan ”${existing.title}” i biblioteket`);
       else if (!res) toast("Hittade ingen information om boken. Fyll i själv.");
-      editWish(null, res || (existing ? { author: existing.author, title: existing.title } : null));
+      editWish(null, { ...(res || (existing ? { author: existing.author, title: existing.title } : {})), isbn });
     });
     return;
   }
@@ -1071,7 +1102,7 @@ async function lookup(isbn) {
   for (const s of sources) { try { const r = await s(); if (r && r.title) { found = r; break; } } catch (e) {} }
   if (found) {
     const [pages, origin, year] = await Promise.all([
-      found.pages ? found.pages : fetchPages({ isbn, title: found.title, author: found.author }).catch(() => 0),
+      found.pages ? found.pages : Promise.race([fetchPages({ isbn, title: found.title, author: found.author }).catch(() => 0), new Promise((r) => setTimeout(() => r(0), 10000))]),
       lookupOrigin(found.author),
       Promise.race([fetchYear(found).catch(() => null), new Promise((r) => setTimeout(() => r(null), 10000))])
     ]);
@@ -1164,11 +1195,11 @@ function migrateOriginTags() {
   dialog({ title: "Flytta ursprungstaggar",
     body: `${list.length} böcker har ursprung som tagg (t.ex. Afrikanskt, Ryskt). Taggarna flyttas till fältet Ursprung och tas bort som taggar.`,
     buttons: [{ label: "Avbryt" }, { label: "Flytta", action: () => {
-      runBatches(list.map((b) => (batch) => batch.update(doc(booksCol, b.id), {
+      runBatches(list.map((b) => (batch) => batch.update(doc(booksCol, b.id), cleanFields({
         tags: b.tags.filter((t) => !ORIGINS.includes(t)),
         origin: [...new Set([...b.origin, ...b.tags.filter((t) => ORIGINS.includes(t))])],
         updatedBy: user ? user.email : ""
-      })));
+      }))));
       toast(`Ursprung flyttat för ${list.length} böcker`);
     } }] });
 }
@@ -1212,6 +1243,14 @@ $("importInput").onchange = async (e) => {
   }
 };
 
+// "1867–69" → 1867, "375 f.Kr." → -375, "-375" → -375
+function parseYear(v) {
+  const t = String(v ?? "").trim();
+  const m = t.match(/-?\d{1,4}/);
+  if (!m) return 0;
+  const y = parseInt(m[0], 10);
+  return /f\.?\s?kr|\bbc\b|\bbce\b/i.test(t) ? -Math.abs(y) : y;
+}
 function toRows(grid) {
   if (!grid.length) return [];
   const header = grid[0];
@@ -1237,7 +1276,7 @@ function toRows(grid) {
     const pages = pCol === null ? 0 : (parseInt(String(r[pCol]).replace(/\D/g, ""), 10) || 0);
     const readBy = rbCol === null ? [] : READERS.filter((n) => String(r[rbCol] || "").toLowerCase().includes(n.toLowerCase()));
     const origin = oCol === null ? [] : parseTags(r[oCol] || "");
-    const year = yCol === null ? 0 : (parseInt(String(r[yCol]).replace(/[^\d-]/g, ""), 10) || 0);
+    const year = yCol === null ? 0 : parseYear(r[yCol]);
     out.push({ author, title, tags, read: readBy.length ? true : read, isbn, note, language, pages, readBy, origin, year });
   }
   return out;
@@ -1319,7 +1358,8 @@ function importRows(rows, common, replace = false) {
       if (rb.length !== (ex.readBy || []).length) { fields.readBy = rb; if (!ex.read) fields.read = true; }
       if (Object.keys(fields).length) {
         fields.updatedBy = user ? user.email : "";
-        ops.push((batch) => batch.update(doc(booksCol, ex.id), fields));
+        const clean = cleanFields(fields);
+        ops.push((batch) => batch.update(doc(booksCol, ex.id), clean));
         updated++;
       } else unchanged++;
     }
@@ -1392,21 +1432,24 @@ const ownsAuthor = (author, names = []) => books.some((b) => !isAnthology(b) && 
 const wishFor = (author, title) => wishes.find((w) => w.title && sameTitle(w.title, title) && (!author || sameAuthor(w.author, author)));
 const authorWish = (author) => wishes.find((w) => !w.title && sameAuthor(w.author, author));
 
-function addWish({ author, title = "", note = "" }) {
+function addWish({ author, title = "", note = "", kind = wishKind, isbn = "" }) {
   if (title ? wishFor(author, title) : authorWish(author)) { toast("Finns redan på önskelistan"); return false; }
-  setDoc(doc(wishCol), { author, title, note, added: Date.now(), updatedBy: user ? user.email : "" }).catch(writeFailed);
+  setDoc(doc(wishCol), cleanWish({ author, title, note, kind, isbn, added: Date.now(), updatedBy: user ? user.email : "" })).catch(writeFailed);
   return true;
 }
+const cleanWish = (w) => ({ ...w, author: clip(w.author, 300), title: clip(w.title, 500), note: clip(w.note, 1000),
+  ...("kind" in w ? { kind: WISH_KINDS.includes(w.kind) ? w.kind : "Skönlitteratur" } : {}), ...("isbn" in w ? { isbn: clip(w.isbn, 20) } : {}) });
 function deleteWish(id) { deleteDoc(doc(wishCol, id)).catch(writeFailed); }
 
 $("wishBtn").onclick = () => {
   mode = mode === "wish" ? "library" : "wish";
+  if (mode === "wish") wishKind = "Skönlitteratur";
   $("list").scrollTop = 0;
   refreshAll();
 };
 
 function addTipsButton(header, author) {
-  if (!author || /^(antologi|okänd)/i.test(author)) return;
+  if (!author || ANTHOLOGY.includes(normName(author))) return;
   const b = document.createElement("button");
   b.className = "icon-btn tips-btn";
   b.setAttribute("aria-label", `Tips om ${author}`);
@@ -1416,10 +1459,24 @@ function addTipsButton(header, author) {
   header.appendChild(b);
 }
 
+// Välj del av önskelistan: Skönlitteratur eller Sakprosa (en åt gången).
+function renderWishChips() {
+  const el = $("chips");
+  el.style.display = "flex";
+  el.innerHTML = "";
+  for (const k of WISH_KINDS) {
+    const c = document.createElement("button");
+    c.className = "chip" + (wishKind === k ? " on" : "");
+    c.innerHTML = `${esc(k)}<small>${wishes.filter((w) => w.kind === k).length}</small>`;
+    c.onclick = () => { wishKind = k; $("list").scrollTop = 0; renderWishChips(); renderList(); };
+    el.appendChild(c);
+  }
+}
 const collapsedWish = new Set();
 function renderWishList() {
   const q = query.toLowerCase();
-  const filtered = wishes.filter((w) => !q || w.author.toLowerCase().includes(q) || displayAuthor(w.author).toLowerCase().includes(q) || w.title.toLowerCase().includes(q) || w.note.toLowerCase().includes(q));
+  const inKind = wishes.filter((w) => w.kind === wishKind);
+  const filtered = inKind.filter((w) => !q || w.author.toLowerCase().includes(q) || displayAuthor(w.author).toLowerCase().includes(q) || w.title.toLowerCase().includes(q) || w.note.toLowerCase().includes(q));
   const list = $("list");
   const scroll = list.scrollTop;
   list.innerHTML = "";
@@ -1441,14 +1498,14 @@ function renderWishList() {
     if (!open) continue;
     for (const w of gw) list.appendChild(wishRow(w));
   }
-  if (!wishes.length) {
+  if (!inKind.length) {
     const e = document.createElement("div");
     e.className = "empty";
-    e.textContent = "Önskelistan är tom.\n\nLägg till en titel eller en författare du är nyfiken på med +, importera en Excelfil via menyn (⋮), eller tryck på glödlampan vid en författare för att få tips.";
+    e.textContent = (wishes.length ? `Inget under ${wishKind} ännu.` : "Önskelistan är tom.") + "\n\nLägg till en titel eller en författare du är nyfiken på med +, importera en Excelfil via menyn (⋮), eller tryck på glödlampan vid en författare för att få tips.";
     list.appendChild(e);
   }
   list.scrollTop = scroll;
-  $("count").innerHTML = `${filtered.length} på önskelistan` + (syncState ? ` <span class="sync">· ${esc(syncState)}</span>` : "");
+  $("count").innerHTML = `${filtered.length} på önskelistan (${wishKind.toLowerCase()})` + (syncState ? ` <span class="sync">· ${esc(syncState)}</span>` : "");
 }
 
 function wishRow(w) {
@@ -1467,16 +1524,32 @@ function wishRow(w) {
 }
 
 function moveToLibrary(w) {
-  editBook(null, { author: w.author, title: w.title }, "", false, w.id);
+  editBook(null, { author: w.author, title: w.title, tags: [w.kind] }, w.isbn || "", false, w.id);
 }
 
 function editWish(w, prefill = null) {
   const body = document.createElement("div");
   const fA = field("Författare", w ? w.author : (prefill?.author || ""));
   const fT = field("Titel (lämna tomt för hela författarskapet)", w ? w.title : (prefill?.title || ""));
-  const fN = field("Anteckning (valfritt)", w ? w.note : (prefill?.note || ""));
-  body.append(fA, fT, fN);
+  const fN = field("Anteckning (valfritt)", w ? w.note : (prefill?.note || ""), 'maxlength="1000"');
+  let kind = w ? w.kind : (prefill?.kind || wishKind);
+  const kRow = document.createElement("div");
+  kRow.className = "field";
+  kRow.innerHTML = `<label>Del av önskelistan</label><div class="sugg"></div>`;
+  const drawKind = () => {
+    const g = kRow.querySelector(".sugg"); g.innerHTML = "";
+    for (const k of WISH_KINDS) {
+      const c = document.createElement("button");
+      c.className = "chip" + (kind === k ? " on" : "");
+      c.textContent = k;
+      c.onclick = () => { kind = k; drawKind(); };
+      g.appendChild(c);
+    }
+  };
+  drawKind();
+  body.append(fA, fT, fN, kRow);
   const inA = fA.querySelector("input"), inT = fT.querySelector("input"), inN = fN.querySelector("input");
+  const isbn = w ? w.isbn : (prefill?.isbn || "");
   if (w && w.title) {
     const mv = document.createElement("button");
     mv.className = "btn-text";
@@ -1502,18 +1575,19 @@ function editWish(w, prefill = null) {
         const author = inA.value.trim(), title = inT.value.trim(), note = inN.value.trim();
         if (!author && !title) { toast("Fyll i författare eller titel"); return false; }
         if (w) {
-          updateDoc(doc(wishCol, w.id), { author, title, note, updatedBy: user ? user.email : "" }).catch(writeFailed);
+          updateDoc(doc(wishCol, w.id), cleanWish({ author, title, note, kind, updatedBy: user ? user.email : "" })).catch(writeFailed);
+          if (kind !== wishKind) toast(`Flyttad till ${kind}`);
           return;
         }
         if (title && ownsTitle(author, title)) {
           setTimeout(() => dialog({
             title: "Finns redan i biblioteket",
             body: `Du har redan ”${title}” i biblioteket. Vill du ändå lägga den på önskelistan, t.ex. för en annan utgåva?`,
-            buttons: [{ label: "Avbryt" }, { label: "Lägg till ändå", action: () => { if (addWish({ author, title, note })) toast("Tillagd på önskelistan"); } }]
+            buttons: [{ label: "Avbryt" }, { label: "Lägg till ändå", action: () => { if (addWish({ author, title, note, kind, isbn })) toast(`Tillagd på önskelistan (${kind})`); } }]
           }), 50);
           return;
         }
-        if (addWish({ author, title, note })) toast("Tillagd på önskelistan");
+        if (addWish({ author, title, note, kind, isbn })) toast(`Tillagd på önskelistan (${kind})`);
       } }
     ]
   });
@@ -1545,28 +1619,42 @@ function checkWishesAfterImport(rows) {
 
 function askImportWishes(rows) {
   let owned = 0, dup = 0;
-  const seen = new Set(), add = [];
+  const seen = new Set(), add = [], fix = [];
   for (const r of rows) {
     const key = normName(r.author) + "|" + (r.title ? normName(r.title) : "");
     if (seen.has(key)) { dup++; continue; }
     seen.add(key);
     if (r.title && ownsTitle(r.author, r.title)) { owned++; continue; }
-    if (r.title ? wishFor(r.author, r.title) : authorWish(r.author)) { dup++; continue; }
+    const ex = r.title ? wishFor(r.author, r.title) : authorWish(r.author);
+    if (ex) {
+      dup++;
+      // Befintlig önskning: rätta del (Skönlitteratur/Sakprosa) och fyll i ISBN från filen.
+      const f = {};
+      if (r.tags.length && kindFromTags(r.tags) !== ex.kind) f.kind = kindFromTags(r.tags);
+      if (r.isbn && !ex.isbn) f.isbn = r.isbn;
+      if (Object.keys(f).length) fix.push([ex, f]);
+      continue;
+    }
     add.push(r);
   }
-  const msg = `Hittade ${rows.length} rader i filen.\n\n• ${add.length} läggs till på önskelistan` +
-    (dup ? `\n• ${dup} finns redan på önskelistan` : "") +
+  const fk = { Skönlitteratur: 0, Sakprosa: 0 };
+  add.forEach((r) => fk[kindFromTags(r.tags)]++);
+  const msg = `Hittade ${rows.length} rader i filen.\n\n• ${add.length} läggs till på önskelistan (${fk.Skönlitteratur} skönlitteratur, ${fk.Sakprosa} sakprosa)` +
+    (dup ? `\n• ${dup} finns redan på önskelistan` + (fix.length ? ` (${fix.length} av dem får del eller ISBN från filen)` : "") : "") +
     (owned ? `\n• ${owned} har du redan i biblioteket och hoppas över` : "") +
     `\n\nRader med bara ett författarnamn blir ”intresserad av författarskapet”.`;
   dialog({ title: "Importera önskelista", body: msg, buttons: [
     { label: "Avbryt" },
     { label: "Importera", action: () => {
-      if (!add.length) return;
+      if (!add.length && !fix.length) return;
       const now = Date.now();
-      runBatches(add.map((r, i) => (batch) => batch.set(doc(wishCol), {
-        author: r.author, title: r.title, note: r.note || "", added: now + i, updatedBy: user ? user.email : ""
-      })));
-      toast(`${add.length} tillagda på önskelistan`);
+      runBatches([
+        ...add.map((r, i) => (batch) => batch.set(doc(wishCol), cleanWish({
+          author: r.author, title: r.title, note: r.note || "", kind: kindFromTags(r.tags), isbn: r.isbn || "", added: now + i, updatedBy: user ? user.email : ""
+        }))),
+        ...fix.map(([ex, f]) => (batch) => batch.update(doc(wishCol, ex.id), cleanWish({ author: ex.author, title: ex.title, note: ex.note, ...f, updatedBy: user ? user.email : "" })))
+      ]);
+      toast(`${add.length} tillagda på önskelistan` + (fix.length ? `, ${fix.length} uppdaterade` : ""));
     } }
   ] });
 }
@@ -1575,8 +1663,8 @@ function exportWishes() {
   if (!wishes.length) { toast("Önskelistan är tom"); return; }
   if (typeof XLSX === "undefined") { toast("Exporten misslyckades"); return; }
   const list = wishes.slice().sort((a, b) => collator.compare(authorSortKey(a), authorSortKey(b)) || collator.compare(a.title, b.title));
-  const ws = XLSX.utils.aoa_to_sheet([["Författare", "Titel", "Anteckning"]].concat(list.map((w) => [w.author, w.title, w.note])));
-  ws["!cols"] = [{ wch: 32 }, { wch: 50 }, { wch: 40 }];
+  const ws = XLSX.utils.aoa_to_sheet([["Författare", "Titel", "Anteckning", "ISBN", "Taggar"]].concat(list.map((w) => [w.author, w.title, w.note, w.isbn || "", w.kind])));
+  ws["!cols"] = [{ wch: 32 }, { wch: 50 }, { wch: 40 }, { wch: 16 }, { wch: 16 }];
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, "Önskelista");
   downloadXlsx(wb, "Onskelista.xlsx");
@@ -1594,6 +1682,14 @@ function downloadXlsx(wb, filename) {
 // ---------- Tips om en författare ----------
 function showTips(author, refresh = false) {
   author = authorNames(naturalName(author))[0];
+  // Typ av författare enligt dina egna taggar på hens böcker: skönlitteratur, sakprosa eller blandat.
+  // Saknas hen i biblioteket används önskelistans del (om hen finns där).
+  const mine = books.filter((b) => !isAnthology(b) && anyAuthor(b.author, [author]));
+  let fic = mine.filter((b) => b.tags.some((t) => ["Skönlitteratur", "Fiktion", "Poesi", "Serier"].includes(t))).length;
+  let non = mine.filter((b) => b.tags.includes("Sakprosa")).length;
+  if (!mine.length) { const ws = wishes.filter((w) => sameAuthor(w.author, author)); fic = ws.filter((w) => w.kind === "Skönlitteratur").length; non = ws.length - fic; }
+  const kind = fic && !non ? "fiction" : non && !fic ? "nonfiction" : fic > 2 * non ? "fiction" : non > 2 * fic ? "nonfiction" : "any";
+  const tipKind = () => kind === "nonfiction" ? "Sakprosa" : kind === "fiction" ? "Skönlitteratur" : (mode === "wish" ? wishKind : "Skönlitteratur");
   const body = document.createElement("div");
   body.className = "tips";
   body.innerHTML = `<h3>Centrala verk du inte har</h3><div class="tips-works"><div class="progress small"><div class="spinner"></div><div>Hämtar verk …</div></div></div>` +
@@ -1616,7 +1712,7 @@ function showTips(author, refresh = false) {
     const show = (items) => items.forEach((w) => worksBox.appendChild(tipItem({
       title: w.title + (w.year ? ` (${w.year})` : ""),
       sub: w.notable ? "Räknas som ett av författarens viktigaste verk" : "",
-      onWish: wishFor(author, w.title) ? null : () => addWish({ author, title: w.title, note: "Tips: centralt verk" }),
+      onWish: wishFor(author, w.title) ? null : () => addWish({ author, title: w.title, note: "Tips: centralt verk", kind: tipKind() }),
       wished: !!wishFor(author, w.title),
       link: goodreadsUrl({ title: w.title, author, isbn: "" })
     })));
@@ -1636,11 +1732,6 @@ function showTips(author, refresh = false) {
     }
   }).catch(() => { worksBox.innerHTML = `<p class="muted">Kunde inte hämta verk just nu. Försök igen senare.</p>`; });
 
-  // Typ av författare enligt dina egna taggar på hens böcker: skönlitteratur, sakprosa eller blandat.
-  const mine = books.filter((b) => !isAnthology(b) && anyAuthor(b.author, [author]));
-  const fic = mine.filter((b) => b.tags.some((t) => ["Skönlitteratur", "Fiktion", "Poesi", "Serier"].includes(t))).length;
-  const non = mine.filter((b) => b.tags.includes("Sakprosa")).length;
-  const kind = fic && !non ? "fiction" : non && !fic ? "nonfiction" : fic > 2 * non ? "fiction" : non > 2 * fic ? "nonfiction" : "any";
   getSimilar(author, { refresh, kind }).then((data) => {
     simBox.innerHTML = "";
     if (!data.similar.length) {
@@ -1664,7 +1755,7 @@ function showTips(author, refresh = false) {
         title: displayAuthor(s.name),
         sub: s.reasons.join(" · "),
         badge: own ? "Finns i ditt bibliotek" : "",
-        onWish: own || authorWish(s.name) ? null : () => addWish({ author: s.name, note: `Tips via ${author}` }),
+        onWish: own || authorWish(s.name) ? null : () => addWish({ author: s.name, note: `Tips via ${author}`, kind: tipKind() }),
         wished: !!authorWish(s.name),
         onTips: () => { d.close(); showTips(s.name); },
         link: "https://www.goodreads.com/search?q=" + encodeURIComponent(s.name).replace(/%20/g, "+")

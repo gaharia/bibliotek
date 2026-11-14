@@ -47,11 +47,10 @@
   .search input:focus { border: 2px solid var(--primary); padding-left: 43px; }
   .search .s-icon { position: absolute; left: 12px; top: 12px; width: 24px; height: 24px; fill: var(--on-variant); }
   .search .clear { position: absolute; right: 0; top: 0; color: var(--on-variant); display: none; }
-  .fab.filter { position: relative; width: 40px; height: 40px; border-radius: 12px; background: var(--surface-variant, #E7E0EC); }
-  .fab.filter svg { fill: var(--on-variant); }
-  .fab.filter.on { background: var(--primary); }
-  .fab.filter.on svg { fill: var(--on-primary, #fff); }
-  .fab.filter .badge { position: absolute; top: -6px; right: -6px; background: #C8553D !important; color: #fff !important; min-width: 16px; height: 16px; border-radius: 8px; background: var(--primary); color: var(--on-primary, #fff); font-size: 11px; line-height: 16px; text-align: center; padding: 0 4px; }
+  .fab.filter { position: relative; width: 56px; height: 56px; border-radius: 16px; background: var(--primary); }
+  .fab.filter svg { fill: var(--on-primary, #fff); width: 26px; height: 26px; }
+  .fab.filter.on { box-shadow: 0 0 0 3px var(--secondary), 0 3px 6px rgba(0,0,0,.25); }
+  .fab.filter .badge { position: absolute; top: -6px; right: -6px; background: #C8553D !important; color: #fff !important; min-width: 20px; height: 20px; border-radius: 10px; box-shadow: 0 0 0 2px var(--surface, #fff); background: var(--primary); color: var(--on-primary, #fff); font-size: 12px; font-weight: 600; line-height: 20px; text-align: center; padding: 0 5px; }
   .active-filters { padding-top: 0; flex-wrap: wrap; overflow: visible; }
   #chips { flex-wrap: wrap; overflow: visible; gap: 6px; padding: 8px 16px 4px; }
   #chips .chip { height: 30px; padding: 0 10px; font-size: 13px; gap: 4px; }
@@ -79,7 +78,7 @@
   .chip.on { background: var(--primary-container); border-color: transparent; color: var(--on-surface); }
   .chip.on::before { content: "✓"; }
   .count { font-size: 12px; font-weight: 500; margin: 0 16px 4px; color: var(--on-surface); letter-spacing: .3px; }
-  .list { flex: 1; overflow-y: auto; padding-bottom: 150px; }
+  .list { flex: 1; overflow-y: auto; padding-bottom: 200px; }
   .row { display: flex; align-items: center; min-height: 56px; padding: 6px 4px 6px 16px; cursor: pointer; }
   .row:hover, .header:hover { background: var(--hover); }
   .row.grouped { padding-left: 40px; }
