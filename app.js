@@ -33,16 +33,10 @@ const NAME_EXCEPTIONS = [
   ["Ngũgĩ wa Thiong'o", "Ngũgĩ wa Thiong'o"]
 ];
 const nameException = (a) => NAME_EXCEPTIONS.find(([n, d]) => normName(n) === normName(a) && (a.includes(",") === d.includes(",") || !a.includes(",")));
-function displayAuthor(name) {
-  const a = String(name || "").trim().replace(/\s+/g, " ");
-  if (!a) return "";
-  const ex = nameException(a);
-  if (ex) return ex[1];
-  if (/\s(&|och|and)\s/i.test(a)) {
-    // "Charlotte, Emily & Anne Brontë" → "Brontë, Charlotte, Emily & Anne"
-    const m = a.match(/^(.*\S)\s+(\S+)$/);
-    return m ? `${m[2]}, ${m[1]}` : a;
-  }
+// Redaktörsmarkering, t.ex. "(red.)", flyttas sist och påverkar inte sorteringen.
+const EDITOR_RE = /\s*\((red|reds|ed|eds|utg)\.?\)\s*$/i;
+const splitEditor = (a) => { const m = a.match(EDITOR_RE); return m ? [a.slice(0, m.index).trim(), m[0].trim()] : [a, ""]; };
+function invertOne(a) {
   if (a.includes(",")) return a;
   const p = a.split(" ");
   if (p.length === 1) return a;
@@ -51,9 +45,27 @@ function displayAuthor(name) {
   if (/^(jr|sr|d\.?\s?y|d\.?\s?ä|ii|iii)\.?$/i.test(p[last]) && last > 1) last--;
   return `${p[last]}, ${p.slice(0, last).concat(p.slice(last + 1)).join(" ")}`;
 }
+function displayAuthor(name) {
+  const [a, ed] = splitEditor(String(name || "").trim().replace(/\s+/g, " "));
+  if (!a) return ed;
+  const tail = ed ? " " + ed : "";
+  const ex = nameException(a);
+  if (ex) return ex[1] + tail;
+  const multi = a.match(/^(.+?)(\s*(?:,|&|\soch\s|\sand\s)\s*)(.+)$/i);
+  if (multi && /\s(&|och|and)\s/i.test(a)) {
+    if (multi[1].includes(" ")) {
+      // Flera fullständiga namn: "Anders Burman & Anders Bartonek" → "Burman, Anders & Anders Bartonek"
+      return invertOne(multi[1]) + multi[2] + multi[3] + tail;
+    }
+    // Delat efternamn: "Charlotte, Emily & Anne Brontë" → "Brontë, Charlotte, Emily & Anne"
+    const m = a.match(/^(.*\S)\s+(\S+)$/);
+    return (m ? `${m[2]}, ${m[1]}` : a) + tail;
+  }
+  return invertOne(a) + tail;
+}
 // Omvänt: "Efternamn, Förnamn" → "Förnamn Efternamn" (för sökningar och jämförelser).
 function naturalName(name) {
-  const a = String(name || "").trim();
+  const a = splitEditor(String(name || "").trim())[0];
   const ex = nameException(a);
   if (ex) return ex[0];
   if (/&|\soch\s/i.test(a)) return a;
@@ -306,14 +318,15 @@ function renderChips() {
     el.appendChild(c);
     return c;
   };
-  chip("Alla", !selectedMeta.size, () => { selectedMeta.clear(); renderChips(); renderList(); });
+  // Inget valt = alla böcker. Raden bryts vid behov så att alla metataggar får plats.
   for (const m of META) {
-    chip(`${m} (${counts.get(m) || 0})`, selectedMeta.has(m), () => {
+    const c = chip(m, selectedMeta.has(m), () => {
       selectedMeta.has(m) ? selectedMeta.delete(m) : selectedMeta.add(m); renderChips(); renderList();
     });
+    c.insertAdjacentHTML("beforeend", `<small>${counts.get(m) || 0}</small>`);
     if (m === "Sakprosa" && selectedMeta.has("Sakprosa")) {
       const n = books.filter(politicsOnly).length;
-      const t = chip(`Inkl. politik (${n})`, includePolitics, () => { includePolitics = !includePolitics; renderChips(); renderList(); }, "toggle");
+      const t = chip(`Inkl. politik ${n}`, includePolitics, () => { includePolitics = !includePolitics; renderChips(); renderList(); }, "toggle");
       t.title = "Sakprosa med taggen Socialism, Anarkism eller Antikolonialism";
     }
   }
@@ -402,6 +415,13 @@ function bookRow(b, grouped) {
   return row;
 }
 
+// "2 böcker · 3 noveller · 1 läst": noveller (taggen Noveller) räknas för sig.
+function groupCounts(list) {
+  const shorts = list.filter((b) => b.tags.includes("Noveller")).length, nb = list.length - shorts;
+  const read = list.filter((x) => x.read).length;
+  return [nb ? (nb === 1 ? "1 bok" : `${nb} böcker`) : "", shorts ? (shorts === 1 ? "1 novell" : `${shorts} noveller`) : "",
+    `${read} ${read === 1 ? "läst" : "lästa"}`].filter(Boolean).join(" · ");
+}
 function renderList() {
   if (mode === "wish") { renderWishList(); return; }
   const q = query.toLowerCase();
@@ -420,7 +440,7 @@ function renderList() {
       const h = document.createElement("div");
       h.className = "header" + (open ? " open" : "");
       h.innerHTML = `${ICON_CHEV}<div class="n">${esc(displayAuthor(gb[0].author) || "Okänd författare")}</div>` +
-        `<div class="c">${plural(gb.length)} · ${gb.filter((x) => x.read).length} lästa</div>`;
+        `<div class="c">${groupCounts(gb)}</div>`;
       addTipsButton(h, gb[0].author.trim());
       h.onclick = () => { if (query) return; expanded.has(k) ? expanded.delete(k) : expanded.add(k); renderList(); };
       list.appendChild(h);
@@ -1392,7 +1412,7 @@ function downloadXlsx(wb, filename) {
 
 // ---------- Tips om en författare ----------
 function showTips(author, refresh = false) {
-  author = naturalName(author);
+  author = authorNames(naturalName(author))[0];
   const body = document.createElement("div");
   body.className = "tips";
   body.innerHTML = `<h3>Centrala verk du inte har</h3><div class="tips-works"><div class="progress small"><div class="spinner"></div><div>Hämtar verk …</div></div></div>` +
