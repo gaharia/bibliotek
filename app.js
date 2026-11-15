@@ -273,7 +273,13 @@ function toData(b) {
   });
 }
 // Skrivningar sparas lokalt direkt och synkas när det finns nät.
-function writeFailed(err) { toast("Kunde inte spara: " + (err && err.message ? err.message : err)); }
+function writeFailed(err) {
+  const code = err && err.code;
+  if (code === "not-found") toast("Kunde inte spara: posten har tagits bort på en annan enhet");
+  else if (code === "permission-denied") toast("Kunde inte spara: databasen nekade ändringen");
+  else if (code === "resource-exhausted") toast("Kunde inte spara: dagens gratiskvot hos Firebase är slut (nollställs kl. 09)");
+  else toast("Kunde inte spara: " + (err && err.message ? err.message : err));
+}
 function addBookDoc(b) { const ref = doc(booksCol); setDoc(ref, toData(b)).catch(writeFailed); return ref.id; }
 function updateBookDoc(id, fields) {
   updateDoc(doc(booksCol, id), cleanFields({ ...fields, updatedBy: user ? user.email : "" })).catch(writeFailed);
@@ -558,8 +564,14 @@ function refreshAll() {
   const wish = mode === "wish";
   document.querySelector(".appbar h1").textContent = wish ? "Önskelista" : "Bibliotek";
   $("wishBtn").classList.toggle("on", wish);
-  $("wishBtn").querySelector("span").textContent = wishes.length ? `Önskelista (${wishes.length})` : "Önskelista";
+  // I önskelistan blir knappen en väg tillbaka till biblioteket.
+  $("wishBtn").querySelector("span").textContent = wish ? "Bibliotek" : wishes.length ? `Önskelista (${wishes.length})` : "Önskelista";
+  $("wishBtn").setAttribute("aria-label", wish ? "Tillbaka till biblioteket" : "Visa önskelistan");
   $("statusGroup").style.display = wish ? "none" : "";
+  $("wishKindGroup").style.display = wish ? "" : "none";
+  // I önskelistan: tillbakapil i titelraden i stället för önskelisteknappen (sparar en rad).
+  $("backBtn").hidden = !wish;
+  $("wishBtn").style.display = wish ? "none" : "";
 
   $("filterBtn").style.display = wish ? "none" : "";
   if (wish) { renderWishChips(); $("activeFilters").style.display = "none"; } else renderChips();
@@ -604,6 +616,7 @@ function renderMenu() {
 }
 $("menuBtn").onclick = (e) => { e.stopPropagation(); $("menu").classList.toggle("open"); };
 document.addEventListener("click", (e) => { if (!$("menu").contains(e.target)) $("menu").classList.remove("open"); });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") $("menu").classList.remove("open"); });
 
 function choiceDialog(title, opts, current, onPick) {
   const body = document.createElement("div");
@@ -816,7 +829,8 @@ function editBook(book, prefill = null, prefillIsbn = "", fromScan = false, from
   const langRow = document.createElement("div");
   langRow.className = "field-row";
   const lang0 = book ? book.language : (prefill?.language || "");
-  langRow.innerHTML = `<div class="field"><label>Språk</label><select>${LANGS.map((l) => `<option value="${l}"${l === (LANGS.includes(lang0) ? lang0 : "Övrigt") ? " selected" : ""}>${l}</option>`).join("")}</select></div>` +
+  const langSel = !lang0 ? "" : LANGS.includes(lang0) ? lang0 : "Övrigt";
+  langRow.innerHTML = `<div class="field"><label>Språk</label><select><option value=""${langSel === "" ? " selected" : ""}>–</option>${LANGS.map((l) => `<option value="${l}"${l === langSel ? " selected" : ""}>${l}</option>`).join("")}</select></div>` +
     `<div class="field"><label>Sidor</label><input class="in-pages" inputmode="numeric" value="${(book ? book.pages : prefill?.pages) || ""}"></div>` +
     `<div class="field"><label>Utgiven</label><input class="in-year" inputmode="numeric" placeholder="år" value="${(book ? book.year : prefill?.year) || ""}"></div>` +
     `<button class="btn-text small fetch-pages">Hämta sidor och år</button>`;
@@ -919,7 +933,19 @@ function editBook(book, prefill = null, prefillIsbn = "", fromScan = false, from
           addBookDoc({ author, title, tags, read, isbn, added: Date.now(), pages, language, note, readBy, origin, year });
           if (fromWishId) { deleteWish(fromWishId); toast(`”${title}” flyttad från önskelistan till biblioteket`); }
           else setTimeout(() => checkWishAfterAdd(author, title), 300);
-        } else updateBookDoc(book.id, { author, title, tags, read, isbn, pages, language, note, readBy, origin, year });
+        } else {
+          const next = { author, title, tags, read, isbn, pages, language, note, readBy, origin, year };
+          // Raderad på den andra telefonen medan dialogen var öppen?
+          if (!books.some((b) => b.id === book.id)) {
+            dialog({ title: "Boken är borttagen", body: "Boken togs bort på en annan enhet medan du redigerade den. Vill du spara den som en ny bok?",
+              buttons: [{ label: "Avbryt" }, { label: "Spara som ny", action: () => { addBookDoc({ ...next, added: book.added || Date.now() }); } }] });
+            return;
+          }
+          // Skicka bara det du faktiskt ändrat, så att samtidiga ändringar från den andra telefonen inte skrivs över.
+          const same = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+          const changed = Object.fromEntries(Object.entries(next).filter(([k, v]) => !same(v, k === "pages" || k === "year" ? (book[k] || 0) : book[k])));
+          if (Object.keys(changed).length) updateBookDoc(book.id, changed);
+        }
         expanded.add(groupKey({ author }));
         if (fromScan) snackbar(`”${title}” sparad`, "Skanna nästa", startScan, 6000);
       } }
@@ -1171,7 +1197,7 @@ async function backgroundPages(list) {
   const upd = () => { label.textContent = `Hämtar sidor och år ${done}/${list.length} (hittade ${found})`; };
   pill.querySelector("button").onclick = () => { cancelled = true; };
   upd();
-  $("phone").appendChild(pill);
+  $("count").after(pill);
   for (const b of list) {
     if (cancelled) break;
     const cur = books.find((x) => x.id === b.id) || b;
@@ -1189,7 +1215,8 @@ async function backgroundPages(list) {
   }
   pill.remove();
   bgPagesRunning = false;
-  toast(cancelled ? `Avbröt. Hittade uppgifter för ${found} böcker.` : `Sidantal eller år hittades för ${found} av ${list.length} böcker.`);
+  const bk = (n) => n === 1 ? "1 bok" : `${n} böcker`;
+  toast(cancelled ? `Avbröt. Hittade uppgifter för ${bk(found)}.` : `Sidantal eller år hittades för ${found} av ${bk(list.length)}.`);
 }
 
 // Engångsstädning: taggar som är ursprung (t.ex. "Afrikanskt") flyttas till fältet Ursprung.
@@ -1445,6 +1472,7 @@ const cleanWish = (w) => ({ ...w, author: clip(w.author, 300), title: clip(w.tit
   ...("kind" in w ? { kind: WISH_KINDS.includes(w.kind) ? w.kind : "Skönlitteratur" } : {}), ...("isbn" in w ? { isbn: clip(w.isbn, 20) } : {}) });
 function deleteWish(id) { deleteDoc(doc(wishCol, id)).catch(writeFailed); }
 
+$("backBtn").onclick = () => $("wishBtn").onclick();
 $("wishBtn").onclick = () => {
   mode = mode === "wish" ? "library" : "wish";
   if (mode === "wish") wishKind = "Skönlitteratur";
@@ -1464,14 +1492,15 @@ function addTipsButton(header, author) {
 }
 
 // Välj del av önskelistan: Skönlitteratur eller Sakprosa (en åt gången).
+// Visas i stället för Alla/Olästa/Lästa när önskelistan är öppen, så att den inte tar en egen rad.
 function renderWishChips() {
-  const el = $("chips");
-  el.style.display = "flex";
+  $("chips").style.display = "none";
+  const el = $("wishKindGroup");
   el.innerHTML = "";
   for (const k of WISH_KINDS) {
     const c = document.createElement("button");
-    c.className = "chip" + (wishKind === k ? " on" : "");
-    c.innerHTML = `${esc(k)}<small>${wishes.filter((w) => w.kind === k).length}</small>`;
+    if (wishKind === k) c.className = "on";
+    c.innerHTML = `${esc(k)} <small>${wishes.filter((w) => w.kind === k).length}</small>`;
     c.onclick = () => { wishKind = k; $("list").scrollTop = 0; renderWishChips(); renderList(); };
     el.appendChild(c);
   }
@@ -1550,11 +1579,11 @@ function moveToLibrary(w) {
 function editWish(w, prefill = null) {
   const body = document.createElement("div");
   const fA = field("Författare", w ? w.author : (prefill?.author || ""));
-  const fT = field("Titel (lämna tomt för hela författarskapet)", w ? w.title : (prefill?.title || ""));
+  const fT = field("Titel (tom = hela författarskapet)", w ? w.title : (prefill?.title || ""));
   const fN = field("Anteckning (valfritt)", w ? w.note : (prefill?.note || ""), 'maxlength="1000"');
   let kind = w ? w.kind : (prefill?.kind || wishKind);
   const kRow = document.createElement("div");
-  kRow.className = "field";
+  kRow.className = "field origin-field";
   kRow.innerHTML = `<label>Del av önskelistan</label><div class="sugg"></div>`;
   const drawKind = () => {
     const g = kRow.querySelector(".sugg"); g.innerHTML = "";
